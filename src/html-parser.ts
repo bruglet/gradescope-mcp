@@ -214,6 +214,17 @@ function submittedFromStatus(status: NormalizedSubmissionStatus): boolean | null
   return null;
 }
 
+function statusWithScore(
+  status: NormalizedSubmissionStatus,
+  score: { score: number; maxScore: number } | null
+): NormalizedSubmissionStatus {
+  // Gradescope sometimes replaces the textual status with the released score
+  // (for example, "86.0 / 100.0"). A complete score pair is safe evidence
+  // that the work was graded, while the original display text remains in
+  // statusRaw for callers that need it.
+  return status === "unknown" && score ? "graded" : status;
+}
+
 function lateFromText(values: Array<string | null>): boolean | null {
   const text = values.filter(Boolean).join(" ").toLowerCase();
   if (/\blate\b|overdue/.test(text)) return true;
@@ -378,9 +389,9 @@ function assignmentFromRow(
   );
 
   const statusRaw = nullableText(valueContent(statusCell));
-  const status = statusFromRaw(statusRaw);
   const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
   const score = scoreText ? parseScore(scoreText) : null;
+  const status = statusWithScore(statusFromRaw(statusRaw), score);
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
   const lateDueDate =
@@ -454,9 +465,9 @@ function submissionFromContainer(
   const lateCell = firstMatchingCell(cells, headers, /late|lateness/, /late|lateness/);
 
   const statusRaw = nullableText(valueContent(statusCell));
-  const status = statusFromRaw(statusRaw);
   const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
   const score = scoreText ? parseScore(scoreText) : null;
+  const status = statusWithScore(statusFromRaw(statusRaw), score);
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
   const submittedAt =
@@ -525,7 +536,9 @@ export function parseSubmissionList(
 }
 
 function questionSections(root: HTMLElement): HTMLElement[] {
-  const primary = root.querySelectorAll(".question, [data-question-id], .rubric-question");
+  const primary = root.querySelectorAll(
+    ".question, [data-question-id], .rubric-question, .question-group, [class*='question-group']"
+  );
   return primary.length > 0 ? primary : root.querySelectorAll("[class*='question-']");
 }
 
@@ -539,12 +552,21 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
 
   for (const section of questionSections(root)) {
     const name = nullableText(
-      textContent(section.querySelector(".question-title, .name, h3, h4")) || textContent(section)
+      textContent(
+        section.querySelector(
+          ".question-title, .submissionOutline--sectionHeading, .submissionOutlineQuestion--sectionHeading, .name, h2, h3, h4"
+        )
+      ) || textContent(section)
     );
     if (!name) continue;
 
-    const scoreElement = section.querySelector("[class*='score'], .points");
-    const score = parseScore(textContent(scoreElement));
+    const score = [
+      section.querySelector(".submissionOutlineQuestion--weightAndScore"),
+      section.querySelector("[class*='weightAndScore']"),
+      section.querySelector("[class*='score'], .points"),
+    ]
+      .map((element) => parseScore(textContent(element)))
+      .find((value): value is { score: number; maxScore: number } => value !== null) ?? null;
     const key = `${name}|${score?.score ?? ""}|${score?.maxScore ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -597,7 +619,7 @@ export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail 
     ".submissionStatus, [data-status], [class*='status']"
   );
   const statusRaw = nullableText(valueContent(statusElement));
-  const submissionStatus = statusFromRaw(statusRaw);
+  const submissionStatus = statusWithScore(statusFromRaw(statusRaw), score);
   const lateElement = summary.querySelector("[class*='late'], [class*='lateness']");
   const lateText = valueContent(lateElement) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
 

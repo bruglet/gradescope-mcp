@@ -124,6 +124,26 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
   );
 });
 
+test("normalizes score-only assignment rows as graded submissions", () => {
+  const assignments = parseAssignmentList(fixture("assignments-score-only.html"));
+  assert.deepEqual(
+    {
+      submissionStatus: assignments[0].submissionStatus,
+      statusRaw: assignments[0].statusRaw,
+      submitted: assignments[0].submitted,
+      score: assignments[0].pointsAwarded,
+      maxScore: assignments[0].pointsPossible,
+    },
+    {
+      submissionStatus: "graded",
+      statusRaw: "86.0 / 100.0",
+      submitted: true,
+      score: 86,
+      maxScore: 100,
+    }
+  );
+});
+
 test("parses multiple student submission attempts", () => {
   const submissions = parseSubmissionList(fixture("submissions.html"));
   assert.equal(submissions.length, 2);
@@ -158,6 +178,22 @@ test("parses multiple student submission attempts", () => {
       },
     ]
   );
+});
+
+test("normalizes a score-only submission as graded while preserving raw status", () => {
+  const submissions = parseSubmissionList(fixture("submissions-score-only.html"));
+  assert.deepEqual(submissions[0], {
+    id: "305",
+    score: 86,
+    maxScore: 100,
+    submissionStatus: "graded",
+    statusRaw: "86.0 / 100.0",
+    submitted: true,
+    submittedAt: "2026-08-30T12:20:00-07:00",
+    late: null,
+    lateness: null,
+    url: "/courses/101/assignments/205/submissions/305",
+  });
 });
 
 test("filters owned submission links from the student course dashboard", () => {
@@ -216,6 +252,39 @@ test("parses submission score, rubric items, comments, and timestamp", () => {
   assert.equal(detail.questions.length, 2);
   assert.equal(detail.questions[0].rubricItems[0].applied, true);
   assert.equal(detail.questions[0].comments[0], "Clear explanation.");
+});
+
+test("parses live Gradescope question groups and parent scores", () => {
+  const detail = parseSubmissionDetail(fixture("submission-detail-live.html"));
+  assert.equal(detail.score, 86);
+  assert.equal(detail.maxScore, 100);
+  assert.equal(detail.submissionStatus, "graded");
+  assert.equal(detail.submitted, true);
+  assert.deepEqual(
+    detail.questions.map((question) => ({
+      name: question.name,
+      score: question.score,
+      maxScore: question.maxScore,
+      rubricItems: question.rubricItems,
+      comments: question.comments,
+    })),
+    [
+      {
+        name: "Question 1",
+        score: 12,
+        maxScore: 20,
+        rubricItems: [],
+        comments: [],
+      },
+      {
+        name: "Question 2",
+        score: 20,
+        maxScore: 20,
+        rubricItems: [],
+        comments: [],
+      },
+    ]
+  );
 });
 
 test("parses known and unknown regrade statuses without fabricating values", () => {
