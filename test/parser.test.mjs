@@ -39,6 +39,7 @@ test("recognizes the live Your Courses student dashboard without a role heading"
 test("normalizes assignment dates, states, timestamps, lateness, and scores", () => {
   const assignments = parseAssignmentList(fixture("assignments.html"));
   assert.equal(assignments.length, 4);
+  assert.equal(assignments[0].type, "unknown");
 
   assert.deepEqual(assignments[0], {
     id: "201",
@@ -83,6 +84,7 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
       name: assignment.name,
       dueDate: assignment.dueDate,
       lateDueDate: assignment.lateDueDate,
+      type: assignment.type,
       submissionStatus: assignment.submissionStatus,
       submitted: assignment.submitted,
       url: assignment.url,
@@ -93,6 +95,7 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
         name: "Homework 1",
         dueDate: "2026-09-02T10:00:00-07:00",
         lateDueDate: "2026-09-04T10:00:00-07:00",
+        type: "unknown",
         submissionStatus: "unsubmitted",
         submitted: false,
         url: "/courses/101/assignments/701",
@@ -102,6 +105,7 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
         name: "Lab 2",
         dueDate: "Sep 8 at 11:59PM",
         lateDueDate: null,
+        type: "unknown",
         submissionStatus: "submitted",
         submitted: true,
         url: "/courses/101/assignments/702",
@@ -111,6 +115,7 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
         name: "Worksheet 3",
         dueDate: "Sep 10 at 11:59PM",
         lateDueDate: null,
+        type: "unknown",
         submissionStatus: "unsubmitted",
         submitted: false,
         url: "/courses/101/assignments/703",

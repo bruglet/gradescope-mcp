@@ -176,6 +176,16 @@ function labeledDateContent(
 
   const times = element.querySelectorAll("time[datetime]");
   for (const time of times) {
+    const timeText = textContent(time);
+    const timeLabel = time.getAttribute("aria-label") ?? "";
+    if (labelPattern.test(timeText) || labelPattern.test(timeLabel)) {
+      const displayedDate =
+        timeText.match(
+          new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
+        )?.[1] ?? timeText;
+      return nullableText(time.getAttribute("datetime") ?? displayedDate);
+    }
+
     const textBefore = textBeforeDescendant(element, time);
     if (textBefore && labelPattern.test(textBefore)) {
       return nullableText(time.getAttribute("datetime") ?? textContent(time));
@@ -307,7 +317,7 @@ export function parseDashboard(html: string): GradescopeCourse[] {
 }
 
 function assignmentType(row: HTMLElement, href: string): string {
-  const typeElement = row.querySelector(".assignment-type, [class*='type'], .badge");
+  const typeElement = row.querySelector(".assignment-type, .badge, [data-assignment-type]");
   const type = nullableText(textContent(typeElement));
   if (type) return type.toLowerCase();
   if (href.includes("programming")) return "programming";

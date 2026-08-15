@@ -103,6 +103,7 @@ test("list-assignments parses unlinked student dashboard rows", async () => {
     });
 
     assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.assignments[0].assignment_type, "unknown");
     assert.deepEqual(
       result.structuredContent.assignments.map((assignment) => ({
         assignment_id: assignment.assignment_id,
