@@ -70,6 +70,55 @@ test("normalizes assignment dates, states, timestamps, lateness, and scores", ()
   assert.equal(assignments[3].submitted, null);
 });
 
+test("parses student dashboard rows with assignment IDs but no links", () => {
+  const assignments = parseAssignmentList(
+    fixture("assignments-unlinked-table.html"),
+    "101"
+  );
+
+  assert.equal(assignments.length, 3);
+  assert.deepEqual(
+    assignments.map((assignment) => ({
+      id: assignment.id,
+      name: assignment.name,
+      dueDate: assignment.dueDate,
+      lateDueDate: assignment.lateDueDate,
+      submissionStatus: assignment.submissionStatus,
+      submitted: assignment.submitted,
+      url: assignment.url,
+    })),
+    [
+      {
+        id: "701",
+        name: "Homework 1",
+        dueDate: "2026-09-02T10:00:00-07:00",
+        lateDueDate: "2026-09-04T10:00:00-07:00",
+        submissionStatus: "unsubmitted",
+        submitted: false,
+        url: "/courses/101/assignments/701",
+      },
+      {
+        id: "702",
+        name: "Lab 2",
+        dueDate: "Sep 8 at 11:59PM",
+        lateDueDate: null,
+        submissionStatus: "submitted",
+        submitted: true,
+        url: "/courses/101/assignments/702",
+      },
+      {
+        id: "703",
+        name: "Worksheet 3",
+        dueDate: "Sep 10 at 11:59PM",
+        lateDueDate: null,
+        submissionStatus: "unsubmitted",
+        submitted: false,
+        url: "/courses/101/assignments/703",
+      },
+    ]
+  );
+});
+
 test("parses multiple student submission attempts", () => {
   const submissions = parseSubmissionList(fixture("submissions.html"));
   assert.equal(submissions.length, 2);

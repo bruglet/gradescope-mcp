@@ -580,7 +580,7 @@ export function diagnoseCoursePage(
   let assignments = [] as ReturnType<typeof parseAssignmentList>;
   let parserError: string | null = null;
   try {
-    assignments = parseAssignmentList(html);
+    assignments = parseAssignmentList(html, courseId);
   } catch (error) {
     parserError = safeText(error instanceof Error ? error.message : String(error));
   }

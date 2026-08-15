@@ -30,7 +30,8 @@ export function registerAssignmentTools(
       try {
         await requireStudentCourse(api, course_id);
         const assignments = parseAssignmentList(
-          await api.fetchPage(`/courses/${course_id}`)
+          await api.fetchPage(`/courses/${course_id}`),
+          course_id
         );
 
         return toolSuccess({

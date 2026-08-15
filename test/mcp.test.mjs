@@ -85,6 +85,69 @@ test("lists only student courses and uses the student dashboard for assignments"
   }
 });
 
+test("list-assignments parses unlinked student dashboard rows", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") {
+        return fixture("assignments-unlinked-table.html");
+      }
+      throw new Error(`unexpected path ${path}`);
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "list-assignments",
+      arguments: { course_id: "101" },
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(
+      result.structuredContent.assignments.map((assignment) => ({
+        assignment_id: assignment.assignment_id,
+        assignment_name: assignment.assignment_name,
+        due_date: assignment.due_date,
+        late_due_date: assignment.late_due_date,
+        submission_status: assignment.submission_status,
+        submitted: assignment.submitted,
+        url: assignment.url,
+      })),
+      [
+        {
+          assignment_id: "701",
+          assignment_name: "Homework 1",
+          due_date: "2026-09-02T10:00:00-07:00",
+          late_due_date: "2026-09-04T10:00:00-07:00",
+          submission_status: "unsubmitted",
+          submitted: false,
+          url: "/courses/101/assignments/701",
+        },
+        {
+          assignment_id: "702",
+          assignment_name: "Lab 2",
+          due_date: "Sep 8 at 11:59PM",
+          late_due_date: null,
+          submission_status: "submitted",
+          submitted: true,
+          url: "/courses/101/assignments/702",
+        },
+        {
+          assignment_id: "703",
+          assignment_name: "Worksheet 3",
+          due_date: "Sep 10 at 11:59PM",
+          late_due_date: null,
+          submission_status: "unsubmitted",
+          submitted: false,
+          url: "/courses/101/assignments/703",
+        },
+      ]
+    );
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
 test("rejects instructor courses before accessing course data", async () => {
   const calls = [];
   const connection = await connected({

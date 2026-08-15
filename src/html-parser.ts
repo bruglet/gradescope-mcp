@@ -1,4 +1,4 @@
-import { parse as parseHTML, type HTMLElement } from "node-html-parser";
+import { parse as parseHTML, type HTMLElement, type Node } from "node-html-parser";
 import type {
   GradescopeAssignment,
   GradescopeCourse,
@@ -77,6 +77,116 @@ function firstMatchingCell(
   classMatcher: RegExp
 ): HTMLElement | null {
   return cellByHeader(cells, headers, headerMatcher) ?? cellByClass(cells, classMatcher);
+}
+
+function assignmentPathFromValue(
+  value: string | null | undefined,
+  courseId: string | undefined
+): string | null {
+  if (!value || !courseId) return null;
+
+  try {
+    const url = new URL(value, "https://www.gradescope.com/");
+    if (url.origin !== "https://www.gradescope.com") return null;
+
+    const match = url.pathname.match(
+      new RegExp(`^/courses/${courseId}/assignments/(\\d+)/?$`)
+    );
+    return match ? `/courses/${courseId}/assignments/${match[1]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function rowAssignmentPath(
+  row: HTMLElement,
+  courseId: string | undefined
+): string | null {
+  if (!courseId) return null;
+
+  const elements = [row, ...row.querySelectorAll("*")];
+  for (const element of elements) {
+    for (const attribute of ["href", "data-url", "data-href", "action"]) {
+      const path = assignmentPathFromValue(
+        element.getAttribute(attribute),
+        courseId
+      );
+      if (path) return path;
+    }
+  }
+  return null;
+}
+
+function rowAssignmentId(row: HTMLElement): string | null {
+  const candidates: Array<{ id: string; priority: number }> = [];
+  const elements = [row, ...row.querySelectorAll("*")];
+
+  for (const element of elements) {
+    for (const attribute of [
+      "data-assignment-id",
+      "data-assignment_id",
+      "data-assignment",
+    ]) {
+      const value = element.getAttribute(attribute)?.trim() ?? "";
+      if (/^\d+$/.test(value)) candidates.push({ id: value, priority: 0 });
+    }
+
+    const elementId = element.getAttribute("id")?.trim() ?? "";
+    const assignmentId = elementId.match(/^assignment[-_](\d+)$/i)?.[1];
+    if (assignmentId) candidates.push({ id: assignmentId, priority: 1 });
+
+    const dataId = element.getAttribute("data-id")?.trim() ?? "";
+    if (/^\d+$/.test(dataId)) candidates.push({ id: dataId, priority: 2 });
+  }
+
+  if (candidates.length === 0) return null;
+
+  const bestPriority = Math.min(...candidates.map(({ priority }) => priority));
+  const bestIds = new Set(
+    candidates
+      .filter(({ priority }) => priority === bestPriority)
+      .map(({ id }) => id)
+  );
+  return bestIds.size === 1 ? [...bestIds][0] : null;
+}
+
+function textBeforeDescendant(root: HTMLElement, target: HTMLElement): string | null {
+  let text = "";
+
+  function visit(node: Node): boolean {
+    for (const child of node.childNodes) {
+      if (child === target) return true;
+      if (child.childNodes.length > 0) {
+        if (visit(child)) return true;
+      } else {
+        text += child.textContent;
+      }
+    }
+    return false;
+  }
+
+  return visit(root) ? text : null;
+}
+
+function labeledDateContent(
+  element: HTMLElement | null,
+  labelPattern: RegExp
+): string | null {
+  if (!element) return null;
+
+  const times = element.querySelectorAll("time[datetime]");
+  for (const time of times) {
+    const textBefore = textBeforeDescendant(element, time);
+    if (textBefore && labelPattern.test(textBefore)) {
+      return nullableText(time.getAttribute("datetime") ?? textContent(time));
+    }
+  }
+
+  const text = textContent(element);
+  const match = text.match(
+    new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
+  );
+  return nullableText(match?.[1] ?? null);
 }
 
 function statusFromRaw(raw: string | null): NormalizedSubmissionStatus {
@@ -205,28 +315,43 @@ function assignmentType(row: HTMLElement, href: string): string {
   return "unknown";
 }
 
-function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
+function assignmentFromRow(
+  row: HTMLElement,
+  courseId?: string
+): GradescopeAssignment | null {
   const link = row.querySelector('a[href*="/assignments/"]');
-  const href = link?.getAttribute("href") ?? "";
-  const id = href.match(/\/assignments\/(\d+)/)?.[1];
+  const linkedHref = link?.getAttribute("href") ?? "";
+  const linkedId = linkedHref.match(/\/assignments\/(\d+)/)?.[1];
+  const rowPath = rowAssignmentPath(row, courseId);
+  const id = linkedId ?? rowPath?.match(/\/assignments\/(\d+)/)?.[1] ?? rowAssignmentId(row);
   if (!id) return null;
+
+  const href = linkedHref || rowPath || (courseId ? `/courses/${courseId}/assignments/${id}` : "");
+  if (!href) return null;
 
   const cells = row.querySelectorAll("td, th");
   const headers = headerNames(row);
   const rowText = textContent(row);
 
-  const lateDueCell = firstMatchingCell(
-    cells,
-    headers,
-    /late due|late deadline|late submission deadline/,
-    /late.*due|late.*deadline|late.*date/
-  );
-  const dueCell = firstMatchingCell(
-    cells,
-    headers,
-    /^(?!.*late).*(due|deadline)/,
-    /due|deadline|date/
-  );
+  const lateDueCell =
+    firstMatchingCell(
+      cells,
+      headers,
+      /late due|late deadline|late submission deadline/,
+      /late.*due|late.*deadline|late.*date/
+    ) ??
+    cells.find((cell) =>
+      /\blate\s+(?:due\s+date|deadline)\b/i.test(textContent(cell))
+    ) ??
+    null;
+  const dueCell =
+    cellByHeader(cells, headers, /^(?:due|due date|deadline|deadline date)$/) ??
+    firstMatchingCell(
+      cells,
+      headers,
+      /^(?!.*late).*(due|deadline)/,
+      /due|deadline|date/
+    );
   const statusCell = firstMatchingCell(cells, headers, /(^| )status($| )/, /status|submission/);
   const scoreCell = firstMatchingCell(cells, headers, /score|grade|points/, /score|grade|points/);
   const submittedAtCell = firstMatchingCell(
@@ -248,13 +373,18 @@ function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
   const score = scoreText ? parseScore(scoreText) : null;
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
+  const lateDueDate =
+    labeledDateContent(lateDueCell, /\blate\s+(?:due\s+date|deadline)\b/i) ??
+    valueContent(lateDueCell);
+  const nameCell =
+    cellByHeader(cells, headers, /^(?:name|assignment)$/) ?? cells[0] ?? null;
 
   return {
     id,
-    name: textContent(link),
+    name: nullableText(textContent(link)) ?? textContent(nameCell),
     type: assignmentType(row, href),
     dueDate: valueContent(dueCell),
-    lateDueDate: valueContent(lateDueCell),
+    lateDueDate,
     released: !row.querySelector(".unreleased, .draft") && !/\bunreleased\b/i.test(rowText),
     submissionStatus: status,
     statusRaw,
@@ -268,13 +398,16 @@ function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
   };
 }
 
-export function parseAssignmentList(html: string): GradescopeAssignment[] {
+export function parseAssignmentList(
+  html: string,
+  courseId?: string
+): GradescopeAssignment[] {
   const root = parseHTML(html);
   const assignments: GradescopeAssignment[] = [];
   const seenIds = new Set<string>();
 
   for (const row of root.querySelectorAll("tr, .assignment-row")) {
-    const assignment = assignmentFromRow(row);
+    const assignment = assignmentFromRow(row, courseId);
     if (!assignment || seenIds.has(assignment.id)) continue;
     seenIds.add(assignment.id);
     assignments.push(assignment);

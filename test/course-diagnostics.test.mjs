@@ -109,17 +109,18 @@ test("recognizes a returned login page without exposing credentials or CSRF valu
   assert.equal(serialized.includes("student@example.edu"), false);
 });
 
-test("identifies assignment-shaped rows without links and exposes only safe ID/path candidates", () => {
+test("recognizes assignment-shaped rows without links after the parser repair", () => {
   const result = diagnoseCoursePage(
     fixture("course-unlinked-table.html"),
     "101",
     "CSE 101"
   );
 
-  assert.equal(result.parser.current_assignment_count, 0);
+  assert.equal(result.parser.current_assignment_count, 2);
+  assert.deepEqual(result.parser.current_assignment_ids.items, ["601", "602"]);
   assert.equal(result.discovery.generic_assignment_link_count, 0);
   assert.equal(result.structure.assignment_table_evidence, true);
-  assert.match(result.warnings.join("\n"), /selector-mismatch/);
+  assert.deepEqual(result.warnings, []);
   assert.deepEqual(
     result.structure.tables.items[0].rows.items.map((row) => ({
       ids: row.numeric_assignment_id_candidates.items,
