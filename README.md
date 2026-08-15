@@ -10,6 +10,10 @@ This is a self-hosted fork of [TylerFlar/claude-gradescope-mcp](https://github.c
 
 The server exposes exactly these five MCP tools:
 
+> Temporary B1 diagnostics: this branch additionally exposes `diagnose-course`.
+> It is read-only, intentionally temporary, and will be removed after the live
+> assignment parser repair. It is not part of the production five-tool surface.
+
 | Tool | Purpose |
 |------|---------|
 | `list-courses` | Lists courses under the logged-in account's Student Courses section. |
