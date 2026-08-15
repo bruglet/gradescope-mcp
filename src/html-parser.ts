@@ -606,6 +606,348 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
   return questions;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordValue(record: JsonRecord, keys: string[]): unknown {
+  for (const key of keys) {
+    if (key in record) return record[key];
+  }
+  return null;
+}
+
+function scalarText(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  return nullableText(String(value));
+}
+
+function scalarNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) return null;
+  const number = Number.parseFloat(trimmed);
+  return Number.isFinite(number) ? number : null;
+}
+
+function numericIdentifier(value: unknown): string | null {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return String(value);
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return value.trim();
+  }
+  return null;
+}
+
+function recordNumber(record: JsonRecord, keys: string[]): number | null {
+  for (const key of keys) {
+    const number = scalarNumber(record[key]);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
+function questionIdFromRecord(
+  record: JsonRecord,
+  includeRecordId: boolean
+): string | null {
+  const direct = numericIdentifier(
+    recordValue(record, ["question_id", "questionId", "questionID"])
+  );
+  if (direct) return direct;
+
+  const question = record.question;
+  if (isJsonRecord(question)) {
+    const nested = questionIdFromRecord(question, true);
+    if (nested) return nested;
+  } else {
+    const nested = numericIdentifier(question);
+    if (nested) return nested;
+  }
+
+  return includeRecordId ? numericIdentifier(record.id) : null;
+}
+
+function questionNameFromRecord(record: JsonRecord): string | null {
+  for (const key of [
+    "name",
+    "title",
+    "question_name",
+    "questionName",
+    "display_name",
+    "displayName",
+    "label",
+  ]) {
+    const value = scalarText(record[key]);
+    if (value && !/^\(no title\)$/i.test(value)) return value;
+  }
+
+  if (isJsonRecord(record.question)) {
+    return questionNameFromRecord(record.question);
+  }
+  return null;
+}
+
+const maxScoreKeys = [
+  "max_score",
+  "maxScore",
+  "points_possible",
+  "pointsPossible",
+  "max_points",
+  "maxPoints",
+  "total_points",
+  "totalPoints",
+  "points",
+];
+
+const explicitMaxScoreKeys = maxScoreKeys.filter((key) => key !== "points");
+
+function questionMaxScore(record: JsonRecord): number | null {
+  return recordNumber(record, maxScoreKeys);
+}
+
+function questionScore(record: JsonRecord): {
+  score: number | null;
+  maxScore: number | null;
+} {
+  const scoreValue =
+    recordValue(record, [
+      "score",
+      "points_awarded",
+      "pointsAwarded",
+      "earned_score",
+      "earnedScore",
+    ]) ?? record.points;
+  const scoreText = scalarText(scoreValue);
+  const pair = scoreText ? parseScore(scoreText) : null;
+  if (pair) return pair;
+
+  return {
+    score: scalarNumber(scoreValue),
+    maxScore: recordNumber(record, explicitMaxScoreKeys),
+  };
+}
+
+interface QuestionMetadata {
+  name: string | null;
+  maxScore: number | null;
+}
+
+function mergeQuestionMetadata(
+  metadata: Map<string, QuestionMetadata>,
+  id: string,
+  next: QuestionMetadata
+): void {
+  const previous = metadata.get(id);
+  metadata.set(id, {
+    name: previous?.name ?? next.name,
+    maxScore: previous?.maxScore ?? next.maxScore,
+  });
+}
+
+function collectQuestionMetadata(
+  value: unknown,
+  metadata: Map<string, QuestionMetadata>,
+  inheritedId: string | null = null,
+  depth = 0
+): void {
+  if (depth > 8) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectQuestionMetadata(item, metadata, inheritedId, depth + 1);
+    }
+    return;
+  }
+  if (!isJsonRecord(value)) return;
+
+  const id = questionIdFromRecord(value, true) ?? inheritedId;
+  const name = questionNameFromRecord(value);
+  const maxScore = questionMaxScore(value);
+  if (id && (name !== null || maxScore !== null)) {
+    mergeQuestionMetadata(metadata, id, { name, maxScore });
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (!Array.isArray(child) && !isJsonRecord(child)) continue;
+    collectQuestionMetadata(
+      child,
+      metadata,
+      numericIdentifier(key) ?? id,
+      depth + 1
+    );
+  }
+}
+
+function objectEntries(value: unknown): Array<{ value: JsonRecord; key: string | null }> {
+  if (Array.isArray(value)) {
+    return value
+      .filter(isJsonRecord)
+      .map((item) => ({ value: item, key: null }));
+  }
+  if (!isJsonRecord(value)) return [];
+  return Object.entries(value)
+    .filter(([, item]) => isJsonRecord(item))
+    .map(([key, item]) => ({ value: item as JsonRecord, key: numericIdentifier(key) }));
+}
+
+function parseViewerProps(root: HTMLElement): JsonRecord | null {
+  const viewer = root.querySelector(
+    'div[data-react-class="AssignmentSubmissionViewer"][data-react-props]'
+  );
+  const raw = viewer?.getAttribute("data-react-props");
+  if (!raw) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isJsonRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseViewerQuestions(
+  props: JsonRecord
+): GradescopeQuestionResult[] {
+  const metadata = new Map<string, QuestionMetadata>();
+  collectQuestionMetadata(props.questions, metadata);
+  collectQuestionMetadata(props.outline, metadata);
+
+  const inorderIds = Array.isArray(props.inorder_leaf_question_ids)
+    ? props.inorder_leaf_question_ids
+        .map(numericIdentifier)
+        .filter((id): id is string => id !== null)
+    : [];
+  const order = new Map(inorderIds.map((id, index) => [id, index]));
+  const entries = objectEntries(props.question_submissions).map((entry, index) => ({
+    ...entry,
+    index,
+    id: questionIdFromRecord(entry.value, false) ?? entry.key,
+  }));
+
+  entries.sort((left, right) => {
+    const leftOrder = left.id ? order.get(left.id) : undefined;
+    const rightOrder = right.id ? order.get(right.id) : undefined;
+    if (leftOrder === undefined && rightOrder === undefined) return left.index - right.index;
+    if (leftOrder === undefined) return 1;
+    if (rightOrder === undefined) return -1;
+    return leftOrder - rightOrder;
+  });
+
+  const questions: GradescopeQuestionResult[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    const meta = entry.id ? metadata.get(entry.id) : undefined;
+    const score = questionScore(entry.value);
+    const maxScore = score.maxScore ?? meta?.maxScore ?? null;
+    const name =
+      questionNameFromRecord(entry.value) ??
+      meta?.name ??
+      (score.score !== null || maxScore !== null ? `Question ${index + 1}` : null);
+    if (!name) continue;
+
+    const key = entry.id ?? `${name}|${score.score ?? ""}|${maxScore ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    questions.push({
+      name,
+      score: score.score,
+      maxScore,
+      rubricItems: [],
+      comments: [],
+    });
+  }
+  return questions;
+}
+
+function parseViewerSubmission(root: HTMLElement): {
+  score: number | null;
+  maxScore: number | null;
+  submissionStatus: NormalizedSubmissionStatus;
+  statusRaw: string | null;
+  submitted: boolean | null;
+  submittedAt: string | null;
+  late: boolean | null;
+  lateness: string | null;
+  questions: GradescopeQuestionResult[];
+} | null {
+  const props = parseViewerProps(root);
+  if (!props) return null;
+
+  const assignmentSubmission = isJsonRecord(props.assignment_submission)
+    ? props.assignment_submission
+    : {};
+  const assignment = isJsonRecord(props.assignment) ? props.assignment : {};
+  const scoreValue = recordValue(assignmentSubmission, ["score", "points_awarded", "pointsAwarded"]);
+  const scorePair = scalarText(scoreValue) ? parseScore(scalarText(scoreValue) ?? "") : null;
+  const score = scorePair?.score ?? scalarNumber(scoreValue);
+  const maxScore =
+    scorePair?.maxScore ??
+    recordNumber(assignmentSubmission, maxScoreKeys) ??
+    recordNumber(assignment, maxScoreKeys);
+  const questions = parseViewerQuestions(props);
+  const totalQuestionMax =
+    questions.length > 0 && questions.every((question) => question.maxScore !== null)
+      ? questions.reduce((total, question) => total + (question.maxScore ?? 0), 0)
+      : null;
+  const resolvedMaxScore = maxScore ??
+    (totalQuestionMax !== null ? totalQuestionMax : null);
+  const statusValue = recordValue(assignmentSubmission, [
+    "submission_status",
+    "submissionStatus",
+    "status",
+  ]);
+  const statusRawCandidate = scalarText(statusValue);
+  const rawStatus = statusFromRaw(statusRawCandidate);
+  const status = statusWithScore(
+    rawStatus,
+    score !== null && resolvedMaxScore !== null
+      ? { score, maxScore: resolvedMaxScore }
+      : null
+  );
+  const explicitSubmitted = recordValue(assignmentSubmission, [
+    "submitted",
+    "is_submitted",
+    "isSubmitted",
+  ]);
+  const submitted =
+    typeof explicitSubmitted === "boolean"
+      ? explicitSubmitted
+      : submittedFromStatus(status);
+  const submittedAt = scalarText(
+    recordValue(assignmentSubmission, [
+      "submitted_at",
+      "submittedAt",
+      "created_at",
+      "createdAt",
+    ])
+  );
+  const explicitLate = recordValue(assignmentSubmission, ["late", "is_late", "isLate"]);
+  const lateness = scalarText(
+    recordValue(assignmentSubmission, ["lateness", "late_by", "lateBy", "late_text"])
+  );
+  const late =
+    typeof explicitLate === "boolean"
+      ? explicitLate
+      : lateFromText([lateness, statusRawCandidate]);
+
+  return {
+    score,
+    maxScore: resolvedMaxScore,
+    submissionStatus: status,
+    statusRaw: rawStatus === "unknown" ? null : statusRawCandidate,
+    submitted,
+    submittedAt,
+    late,
+    lateness,
+    questions,
+  };
+}
+
 export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail {
   const root = parseHTML(html);
   const summary = root.querySelector(
@@ -618,23 +960,42 @@ export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail 
   const statusElement = summary.querySelector(
     ".submissionStatus, [data-status], [class*='status']"
   );
-  const statusRaw = nullableText(valueContent(statusElement));
-  const submissionStatus = statusWithScore(statusFromRaw(statusRaw), score);
+  const viewerSubmission = parseViewerSubmission(root);
+  const htmlStatusRaw = nullableText(valueContent(statusElement));
+  const statusRaw = htmlStatusRaw ?? viewerSubmission?.statusRaw ?? null;
+  const status =
+    htmlStatusRaw !== null
+      ? statusFromRaw(htmlStatusRaw)
+      : viewerSubmission?.submissionStatus ?? "unknown";
+  const htmlScore = score;
+  const resolvedScore = htmlScore?.score ?? viewerSubmission?.score ?? null;
+  const resolvedMaxScore = htmlScore?.maxScore ?? viewerSubmission?.maxScore ?? null;
+  const submissionStatus = statusWithScore(
+    status,
+    resolvedScore !== null && resolvedMaxScore !== null
+      ? { score: resolvedScore, maxScore: resolvedMaxScore }
+      : null
+  );
   const lateElement = summary.querySelector("[class*='late'], [class*='lateness']");
-  const lateText = valueContent(lateElement) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const lateText =
+    valueContent(lateElement) ??
+    viewerSubmission?.lateness ??
+    (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const htmlSubmittedAt = valueContent(summary.querySelector("time[datetime], [class*='submitted']"));
+  const htmlQuestions = parseQuestionResults(root);
 
   return {
     id: "",
-    score: score?.score ?? null,
-    maxScore: score?.maxScore ?? null,
+    score: resolvedScore,
+    maxScore: resolvedMaxScore,
     submissionStatus,
     statusRaw,
-    submitted: submittedFromStatus(submissionStatus),
-    submittedAt: valueContent(summary.querySelector("time[datetime], [class*='submitted']")),
-    late: lateFromText([lateText, statusRaw]),
+    submitted: viewerSubmission?.submitted ?? submittedFromStatus(submissionStatus),
+    submittedAt: htmlSubmittedAt ?? viewerSubmission?.submittedAt ?? null,
+    late: viewerSubmission?.late ?? lateFromText([lateText, statusRaw]),
     lateness: lateText,
     url: "",
-    questions: parseQuestionResults(root),
+    questions: htmlQuestions.length > 0 ? htmlQuestions : viewerSubmission?.questions ?? [],
   };
 }
 

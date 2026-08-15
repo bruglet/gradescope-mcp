@@ -287,6 +287,50 @@ test("parses live Gradescope question groups and parent scores", () => {
   );
 });
 
+test("parses question scores from the server-rendered React bootstrap props", () => {
+  const detail = parseSubmissionDetail(fixture("submission-detail-react-props.html"));
+  assert.equal(detail.score, 86);
+  assert.equal(detail.maxScore, 100);
+  assert.equal(detail.submissionStatus, "graded");
+  assert.equal(detail.statusRaw, null);
+  assert.equal(detail.submitted, true);
+  assert.equal(detail.submittedAt, "2026-06-30T13:33:25.711581-07:00");
+  assert.deepEqual(
+    detail.questions.map((question) => ({
+      name: question.name,
+      score: question.score,
+      maxScore: question.maxScore,
+      rubricItems: question.rubricItems,
+      comments: question.comments,
+    })),
+    [
+      {
+        name: "Question 1",
+        score: 12,
+        maxScore: 20,
+        rubricItems: [],
+        comments: [],
+      },
+      {
+        name: "Question 2",
+        score: 20,
+        maxScore: 20,
+        rubricItems: [],
+        comments: [],
+      },
+    ]
+  );
+});
+
+test("ignores malformed React bootstrap props and keeps the HTML parser safe", () => {
+  const detail = parseSubmissionDetail(
+    '<div data-react-class="AssignmentSubmissionViewer" data-react-props="not-json"></div>'
+  );
+  assert.equal(detail.score, null);
+  assert.equal(detail.maxScore, null);
+  assert.deepEqual(detail.questions, []);
+});
+
 test("parses known and unknown regrade statuses without fabricating values", () => {
   const requests = parseRegradeRequests(fixture("regrades.html"));
   assert.equal(requests.length, 3);
