@@ -5,6 +5,11 @@ import { resolve } from "node:path";
 import express, { type Express, type Response } from "express";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  createAccessMiddleware,
+  type AccessEnvironment,
+  type AccessMiddlewareOptions,
+} from "./access-auth.js";
 import { GradescopeAPI } from "./gradescope-api.js";
 import { createServer } from "./mcp-server.js";
 import type { GradescopeClient } from "./types.js";
@@ -44,13 +49,29 @@ function methodNotAllowed(res: Response): void {
     .send("Method Not Allowed");
 }
 
-export function createHttpApp(api: GradescopeClient): Express {
+export interface HttpAppOptions extends AccessMiddlewareOptions {
+  environment?: AccessEnvironment;
+}
+
+export function createHttpApp(
+  api: GradescopeClient,
+  options: HttpAppOptions = {}
+): Express {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
 
   app.get("/healthz", (_request, response) => {
     response.status(200).json({ status: "ok" });
   });
+
+  // Keep the health endpoint available to container probes, but authenticate
+  // every MCP method before parsing its body or creating a server/transport.
+  app.use(
+    "/mcp",
+    createAccessMiddleware(options.environment ?? process.env, {
+      keySet: options.keySet,
+    })
+  );
+  app.use(express.json({ limit: "1mb" }));
 
   app.post("/mcp", async (request, response) => {
     const server = createServer(api);

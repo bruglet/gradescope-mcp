@@ -1,0 +1,22 @@
+[Unit]
+Description=Student-focused read-only Gradescope MCP
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/bruglet/gradescope-mcp:latest
+ContainerName=gradescope-mcp
+PublishPort=127.0.0.1:3100:3100
+Environment=MCP_TRANSPORT=http
+Environment=MCP_PORT=3100
+EnvironmentFile=%h/.config/gradescope-mcp/gradescope-mcp.env
+AutoUpdate=registry
+ReadOnly=true
+
+[Service]
+Restart=always
+RestartSec=10s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target

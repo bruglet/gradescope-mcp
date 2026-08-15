@@ -1,4 +1,13 @@
+.git
+.github
 node_modules
 dist
-.git
-*.md
+test
+coverage
+.env*
+.dev.vars
+.wrangler
+*.log
+*.pem
+*.key
+*.crt
