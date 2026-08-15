@@ -30,6 +30,16 @@ test("diagnoses recognized assignment table markup", () => {
   assert.equal(result.parser.current_assignment_count, 4);
   assert.equal(result.discovery.generic_assignment_link_count, 4);
   assert.equal(result.structure.tables.total_count, 1);
+  assert.equal(result.structure.assignment_table_evidence, true);
+  assert.equal(result.structure.tables.items[0].rows.total_count, 4);
+  assert.deepEqual(result.structure.tables.items[0].rows.items[0].cell_texts.items, [
+    "Project 1",
+    "Aug 20, 2026 at 11:59 PM",
+    "Aug 22, 2026 at 11:59 PM",
+    "Submitted",
+    "Aug 20, 2026 at 8:10 PM",
+    "95 / 100",
+  ]);
   assert.deepEqual(result.structure.tables.items[0].heading_labels.items, [
     "Assignment",
     "Due Date",
@@ -97,6 +107,29 @@ test("recognizes a returned login page without exposing credentials or CSRF valu
   assert.equal(serialized.includes("password-must-not-appear"), false);
   assert.equal(serialized.includes("script-secret-must-not-appear"), false);
   assert.equal(serialized.includes("student@example.edu"), false);
+});
+
+test("identifies assignment-shaped rows without links and exposes only safe ID/path candidates", () => {
+  const result = diagnoseCoursePage(
+    fixture("course-unlinked-table.html"),
+    "101",
+    "CSE 101"
+  );
+
+  assert.equal(result.parser.current_assignment_count, 0);
+  assert.equal(result.discovery.generic_assignment_link_count, 0);
+  assert.equal(result.structure.assignment_table_evidence, true);
+  assert.match(result.warnings.join("\n"), /selector-mismatch/);
+  assert.deepEqual(
+    result.structure.tables.items[0].rows.items.map((row) => ({
+      ids: row.numeric_assignment_id_candidates.items,
+      paths: row.assignment_path_candidates.items,
+    })),
+    [
+      { ids: ["601"], paths: [] },
+      { ids: ["602"], paths: ["/courses/101/assignments/602"] },
+    ]
+  );
 });
 
 test("distinguishes a likely empty course from unexpected markup", () => {

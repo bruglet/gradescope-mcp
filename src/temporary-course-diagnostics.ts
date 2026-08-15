@@ -41,6 +41,20 @@ const tableDiagnosticSchema = z.object({
   heading_labels: boundedStringListSchema,
   row_count: z.number().int().nonnegative(),
   row_class_names: boundedStringListSchema,
+  rows: z.object({
+    items: z.array(
+      z.object({
+        row_index: z.number().int().nonnegative(),
+        classes: z.array(z.string()),
+        cell_texts: boundedStringListSchema,
+        same_origin_paths: boundedStringListSchema,
+        assignment_path_candidates: boundedStringListSchema,
+        numeric_assignment_id_candidates: boundedStringListSchema,
+      })
+    ),
+    total_count: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }),
 });
 
 export const diagnoseCourseOutputSchema = z.object({
@@ -80,6 +94,7 @@ export const diagnoseCourseOutputSchema = z.object({
       total_count: z.number().int().nonnegative(),
       truncated: z.boolean(),
     }),
+    assignment_table_evidence: z.boolean(),
     row_class_names: boundedStringListSchema,
     card_count: z.number().int().nonnegative(),
     card_class_names: boundedStringListSchema,
@@ -232,6 +247,114 @@ function sameOriginAssignmentPath(
   }
 }
 
+function sameOriginPath(
+  value: string | null | undefined,
+  courseId: string
+): string | null {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value, `${GRADESCOPE_ORIGIN}/`);
+    if (url.origin !== GRADESCOPE_ORIGIN) return null;
+    if (!url.pathname.startsWith(`/courses/${courseId}/`)) return null;
+    return url.pathname;
+  } catch {
+    return null;
+  }
+}
+
+function assignmentPathFromValue(
+  value: string | null | undefined,
+  courseId: string
+): string | null {
+  if (!value) return null;
+  if (/https?:\/\//i.test(value) && !value.includes(GRADESCOPE_ORIGIN)) {
+    return null;
+  }
+
+  const match = value.match(
+    new RegExp(`/courses/${courseId}/assignments/(\\d+)`)
+  );
+  return match
+    ? `/courses/${courseId}/assignments/${match[1]}`
+    : null;
+}
+
+function rowDiagnostic(
+  row: HTMLElement,
+  rowIndex: number,
+  courseId: string
+) {
+  const cells = row
+    .querySelectorAll("td, th")
+    .map((cell) => visibleText(cell))
+    .filter((value): value is string => value !== null);
+  const elements = [row, ...row.querySelectorAll("*")];
+  const sameOriginPaths: string[] = [];
+  const assignmentPathCandidates: string[] = [];
+  const numericAssignmentIdCandidates: string[] = [];
+  const routeAttributes = ["href", "action", "data-url", "data-href", "onclick"];
+  const idAttributes = [
+    "data-assignment-id",
+    "data-assignment_id",
+    "data-assignment",
+    "data-id",
+    "id",
+  ];
+
+  for (const element of elements) {
+    for (const attribute of routeAttributes) {
+      const value = element.getAttribute(attribute);
+      const path = sameOriginPath(value, courseId);
+      if (path) sameOriginPaths.push(path);
+      const assignmentPath = assignmentPathFromValue(value, courseId);
+      if (assignmentPath) assignmentPathCandidates.push(assignmentPath);
+    }
+
+    for (const attribute of idAttributes) {
+      const value = element.getAttribute(attribute)?.trim() ?? "";
+      if (/^\d+$/.test(value) && attribute !== "id") {
+        numericAssignmentIdCandidates.push(value);
+        continue;
+      }
+      const match = value.match(/^assignment[-_](\d+)$/i);
+      if (match) numericAssignmentIdCandidates.push(match[1]);
+    }
+  }
+
+  return {
+    row_index: rowIndex,
+    classes: classNames(row),
+    cell_texts: bounded(cells),
+    same_origin_paths: bounded(Array.from(new Set(sameOriginPaths))),
+    assignment_path_candidates: bounded(
+      Array.from(new Set(assignmentPathCandidates))
+    ),
+    numeric_assignment_id_candidates: bounded(
+      Array.from(new Set(numericAssignmentIdCandidates))
+    ),
+  };
+}
+
+function tableHasAssignmentEvidence(table: HTMLElement): boolean {
+  const headerRow =
+    table.querySelector("thead tr") ?? table.querySelector("tr");
+  const headings = headerRow
+    ? headerRow
+        .querySelectorAll("th, td")
+        .map((cell) => visibleText(cell) ?? "")
+        .join(" ")
+        .toLowerCase()
+    : "";
+  const rowCount = table.querySelectorAll("tr").length - (headerRow ? 1 : 0);
+  return (
+    rowCount > 0 &&
+    /name|assignment/.test(headings) &&
+    /status/.test(headings) &&
+    /due|deadline/.test(headings)
+  );
+}
+
 function loginDiagnostics(root: HTMLElement) {
   const forms = root.querySelectorAll("form");
   const loginForms = forms.filter((form) => {
@@ -265,7 +388,7 @@ function loginDiagnostics(root: HTMLElement) {
   };
 }
 
-function tableDiagnostics(root: HTMLElement) {
+function tableDiagnostics(root: HTMLElement, courseId: string) {
   return root.querySelectorAll("table").map((table) => {
     const headerRow =
       table.querySelector("thead tr") ?? table.querySelector("tr");
@@ -276,14 +399,18 @@ function tableDiagnostics(root: HTMLElement) {
           .filter((value): value is string => value !== null)
       : [];
     const rows = table.querySelectorAll("tr");
+    const dataRows = rows.filter((row) => row !== headerRow);
     const rowClassNames = Array.from(
-      new Set(rows.flatMap((row) => classNames(row)))
+      new Set(dataRows.flatMap((row) => classNames(row)))
     );
 
     return {
       heading_labels: bounded(headings),
-      row_count: Math.max(0, rows.length - (headerRow ? 1 : 0)),
+      row_count: dataRows.length,
       row_class_names: bounded(rowClassNames),
+      rows: bounded(
+        dataRows.map((row, index) => rowDiagnostic(row, index, courseId))
+      ),
     };
   });
 }
@@ -389,6 +516,7 @@ function diagnosticWarnings(
   login: ReturnType<typeof loginDiagnostics>,
   currentAssignmentCount: number,
   genericLinks: AssignmentLinkDiagnostic[],
+  assignmentTableEvidence: boolean,
   coursePageStructure: boolean,
   parserError: string | null
 ): string[] {
@@ -416,8 +544,16 @@ function diagnosticWarnings(
     warnings.push(
       "partial-selector-match: generic assignment links outnumber assignments recognized by the current parser"
     );
-  } else if (!login.detected && genericLinks.length === 0 && currentAssignmentCount === 0) {
-    if (coursePageStructure) {
+  } else if (
+    !login.detected &&
+    genericLinks.length === 0 &&
+    currentAssignmentCount === 0
+  ) {
+    if (assignmentTableEvidence) {
+      warnings.push(
+        "selector-mismatch: assignment-shaped table rows were found, but no assignment links or parsed assignments were found; inspect row route and numeric ID candidates"
+      );
+    } else if (coursePageStructure) {
       warnings.push(
         "valid-empty-course-possible: course-page structure was detected, but no assignment links were found; this may be a genuinely empty course"
       );
@@ -452,11 +588,16 @@ export function diagnoseCoursePage(
   const uniqueAssignmentIds = Array.from(
     new Set(links.map((link) => link.assignment_id))
   );
+  const tables = tableDiagnostics(root, courseId);
+  const assignmentTableEvidence = root
+    .querySelectorAll("table")
+    .some((table) => tableHasAssignmentEvidence(table));
   const structure = classStructure(root);
   const warnings = diagnosticWarnings(
     login,
     assignments.length,
     links,
+    assignmentTableEvidence,
     hasCoursePageStructure(root),
     parserError
   );
@@ -482,7 +623,8 @@ export function diagnoseCoursePage(
       links: bounded(links),
     },
     structure: {
-      tables: bounded(tableDiagnostics(root)),
+      tables: bounded(tables),
+      assignment_table_evidence: assignmentTableEvidence,
       ...structure,
     },
     warnings,
