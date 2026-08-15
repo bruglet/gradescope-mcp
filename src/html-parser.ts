@@ -686,6 +686,13 @@ function questionNameFromRecord(record: JsonRecord): string | null {
     if (value && !/^\(no title\)$/i.test(value)) return value;
   }
 
+  const numberedTitle = scalarText(record.numbered_title);
+  if (numberedTitle) {
+    return /^question\b/i.test(numberedTitle)
+      ? numberedTitle
+      : `Question ${numberedTitle}`;
+  }
+
   if (isJsonRecord(record.question)) {
     return questionNameFromRecord(record.question);
   }
@@ -701,6 +708,7 @@ const maxScoreKeys = [
   "maxPoints",
   "total_points",
   "totalPoints",
+  "weight",
   "points",
 ];
 
