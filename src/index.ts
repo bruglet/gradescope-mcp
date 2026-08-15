@@ -1,95 +1,137 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import express, { type Express, type Response } from "express";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GradescopeAPI } from "./gradescope-api.js";
+import { createServer } from "./mcp-server.js";
+import type { GradescopeClient } from "./types.js";
 
-import { registerCourseTools } from "./tools/courses.js";
-import { registerAssignmentTools } from "./tools/assignments.js";
-import { registerSubmissionTools } from "./tools/submissions.js";
-import { registerGradeTools } from "./tools/grades.js";
-import { registerRosterTools } from "./tools/roster.js";
-import { registerExtensionTools } from "./tools/extensions.js";
-import { registerRegradeTools } from "./tools/regrade-requests.js";
-
-const email = process.env.GRADESCOPE_EMAIL;
-const password = process.env.GRADESCOPE_PASSWORD;
-
-if (!email || !password) {
-  console.error(
-    "Error: GRADESCOPE_EMAIL and GRADESCOPE_PASSWORD environment variables are required.\n" +
-      "Set them to your Gradescope login credentials."
-  );
-  process.exit(1);
+export interface GradescopeCredentials {
+  email: string;
+  password: string;
 }
 
-const api = new GradescopeAPI(email, password);
+export function loadGradescopeCredentials(
+  environment: NodeJS.ProcessEnv = process.env
+): GradescopeCredentials {
+  const email = environment.GRADESCOPE_EMAIL;
+  const password = environment.GRADESCOPE_PASSWORD;
 
-const server = new McpServer({
-  name: "gradescope-mcp",
-  version: "1.0.0",
-});
+  if (!email || !password) {
+    throw new Error(
+      "GRADESCOPE_EMAIL and GRADESCOPE_PASSWORD environment variables are required"
+    );
+  }
 
-registerCourseTools(server, api);
-registerAssignmentTools(server, api);
-registerSubmissionTools(server, api);
-registerGradeTools(server, api);
-registerRosterTools(server, api);
-registerExtensionTools(server, api);
-registerRegradeTools(server, api);
+  return { email, password };
+}
 
-if (process.env.MCP_TRANSPORT === "http") {
-  const { default: express } = await import("express");
-  const { StreamableHTTPServerTransport } = await import(
-    "@modelcontextprotocol/sdk/server/streamableHttp.js"
-  );
-  const crypto = await import("crypto");
+export function createGradescopeClient(
+  environment: NodeJS.ProcessEnv = process.env
+): GradescopeClient {
+  const { email, password } = loadGradescopeCredentials(environment);
+  return new GradescopeAPI(email, password);
+}
 
+function methodNotAllowed(res: Response): void {
+  res
+    .status(405)
+    .set("Allow", "POST")
+    .type("text")
+    .send("Method Not Allowed");
+}
+
+export function createHttpApp(api: GradescopeClient): Express {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: "1mb" }));
 
-  const transports = new Map<string, StreamableHTTPServerTransport>();
+  app.get("/healthz", (_request, response) => {
+    response.status(200).json({ status: "ok" });
+  });
 
-  app.all("/mcp", async (req, res) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  app.post("/mcp", async (request, response) => {
+    const server = createServer(api);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
 
-    if (req.method === "GET") {
-      const transport = transports.get(sessionId!);
-      if (!transport) { res.status(404).send("Session not found"); return; }
-      await transport.handleRequest(req, res);
-    } else if (req.method === "POST") {
-      if (!sessionId) {
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => crypto.randomUUID(),
-          onsessioninitialized: (id) => { transports.set(id, transport); },
+    response.on("close", () => {
+      void transport.close().catch((error: unknown) => {
+        console.error("Failed to close MCP transport:", error);
+      });
+      void server.close().catch((error: unknown) => {
+        console.error("Failed to close MCP server:", error);
+      });
+    });
+
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(request, response, request.body);
+    } catch (error) {
+      console.error("Error handling MCP request:", error);
+      if (!response.headersSent) {
+        response.status(500).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32603,
+            message: "Internal server error",
+          },
+          id: null,
         });
-        transport.onclose = () => {
-          if (transport.sessionId) transports.delete(transport.sessionId);
-        };
-        try { await server.close(); } catch {} await server.connect(transport);
-        await transport.handleRequest(req, res);
-      } else {
-        const transport = transports.get(sessionId);
-        if (!transport) { res.status(404).send("Session not found"); return; }
-        await transport.handleRequest(req, res);
       }
-    } else if (req.method === "DELETE") {
-      const transport = transports.get(sessionId!);
-      if (transport) { await transport.close(); transports.delete(sessionId!); }
-      res.status(200).send();
-    } else {
-      res.status(405).send("Method not allowed");
     }
   });
 
-  const PORT = parseInt(process.env.MCP_PORT || "3100");
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`MCP server listening on http://0.0.0.0:${PORT}/mcp`);
+  app.get("/mcp", (_request, response) => {
+    methodNotAllowed(response);
   });
-} else {
-  const { StdioServerTransport } = await import(
-    "@modelcontextprotocol/sdk/server/stdio.js"
-  );
-  const transport = new StdioServerTransport();
-  try { await server.close(); } catch {} await server.connect(transport);
+
+  app.delete("/mcp", (_request, response) => {
+    methodNotAllowed(response);
+  });
+
+  return app;
+}
+
+export async function start(): Promise<void> {
+  const api = createGradescopeClient();
+  const transport = process.env.MCP_TRANSPORT ?? "stdio";
+
+  if (transport === "http") {
+    const port = Number.parseInt(process.env.MCP_PORT ?? "3100", 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("MCP_PORT must be a valid TCP port");
+    }
+
+    const app = createHttpApp(api);
+    app.listen(port, "0.0.0.0", () => {
+      console.log(
+        `MCP server listening on http://0.0.0.0:${port}/mcp (health: /healthz)`
+      );
+    });
+    return;
+  }
+
+  if (transport !== "stdio") {
+    throw new Error(`Unsupported MCP_TRANSPORT: ${transport}`);
+  }
+
+  const server = createServer(api);
+  await server.connect(new StdioServerTransport());
+}
+
+const isMainModule =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (isMainModule) {
+  try {
+    await start();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

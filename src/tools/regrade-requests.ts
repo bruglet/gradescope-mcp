@@ -1,110 +1,124 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GradescopeAPI } from "../gradescope-api.js";
-import { parseRegradeRequests } from "../html-parser.js";
+import { parseRegradeRequests, parseSubmissionList } from "../html-parser.js";
+import { requireStudentCourse } from "../student-access.js";
+import type { GradescopeClient, GradescopeRegradeRequest } from "../types.js";
+import { listRegradeRequestsOutputSchema } from "../tool-schemas.js";
+import { READ_ONLY_ANNOTATIONS, toolError, toolSuccess } from "../tool-utils.js";
 
-export function registerRegradeTools(server: McpServer, api: GradescopeAPI): void {
-  server.tool(
-    "list-regrade-requests",
-    "List all regrade requests for a Gradescope assignment. Instructors see all requests; students see their own.",
-    {
-      course_id: z.string().describe("The Gradescope course ID"),
-      assignment_id: z.string().describe("The Gradescope assignment ID"),
-    },
-    async (args) => {
-      try {
-        const html = await api.fetchPage(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/regrade_requests`
-        );
-        const requests = parseRegradeRequests(html);
-        if (requests.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "No regrade requests found for this assignment.",
-              },
-            ],
-          };
-        }
-        return {
-          content: [{ type: "text", text: JSON.stringify(requests, null, 2) }],
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
-          isError: true,
-        };
-      }
-    }
+const inputSchema = {
+  course_id: z
+    .string()
+    .regex(/^\d+$/, "course_id must be numeric")
+    .describe("The Gradescope student course ID"),
+  assignment_id: z
+    .string()
+    .regex(/^\d+$/, "assignment_id must be numeric")
+    .describe("The Gradescope assignment ID"),
+};
+
+function requestOutput(request: GradescopeRegradeRequest) {
+  return {
+    regrade_id: request.id,
+    question_name: request.questionName,
+    regrade_status: request.status,
+    regrade_status_raw: request.statusRaw,
+    explanation: request.explanation,
+    response: request.response,
+    requested_at: request.createdAt,
+    url: request.url,
+  };
+}
+
+function mergeRequests(requests: GradescopeRegradeRequest[]): GradescopeRegradeRequest[] {
+  const merged: GradescopeRegradeRequest[] = [];
+  const seen = new Set<string>();
+  for (const request of requests) {
+    const key =
+      request.id ??
+      request.url ??
+      `${request.questionName ?? ""}|${request.createdAt ?? ""}|${request.explanation ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(request);
+  }
+  return merged;
+}
+
+async function requestsFromStudentSubmissions(
+  api: GradescopeClient,
+  courseId: string,
+  assignmentId: string
+): Promise<GradescopeRegradeRequest[]> {
+  const submissions = parseSubmissionList(
+    await api.fetchPage(
+      `/courses/${courseId}/assignments/${assignmentId}/submissions`
+    )
   );
+  const requests: GradescopeRegradeRequest[] = [];
+  for (const submission of submissions) {
+    const detailHtml = await api.fetchPage(submission.url);
+    requests.push(...parseRegradeRequests(detailHtml));
+  }
+  return requests;
+}
 
-  server.tool(
-    "create-regrade-request",
-    "Submit a regrade request for a specific question on your Gradescope submission. Provide an explanation of why you believe the grading should be changed.",
+export function registerRegradeTools(
+  server: McpServer,
+  api: GradescopeClient
+): void {
+  server.registerTool(
+    "list-regrade-requests",
     {
-      course_id: z.string().describe("The Gradescope course ID"),
-      assignment_id: z.string().describe("The Gradescope assignment ID"),
-      question_id: z
-        .string()
-        .describe("The question ID or number to request a regrade for"),
-      explanation: z
-        .string()
-        .describe("Your explanation for why a regrade is warranted"),
+      description:
+        "List the logged-in student's regrade requests for an assignment, including status, explanation, response, and request time when available.",
+      inputSchema,
+      outputSchema: listRegradeRequestsOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    async (args) => {
+    async ({ course_id, assignment_id }) => {
       try {
-        // First visit the submission page to get context
-        await api.fetchPage(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions`
-        );
+        await requireStudentCourse(api, course_id);
 
-        const data: Record<string, string> = {
-          "regrade_request[question_id]": args.question_id,
-          "regrade_request[explanation]": args.explanation,
-        };
-
-        const result = await api.postForm(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/regrade_requests`,
-          data
-        );
-
-        if (result.status === 302 || result.status === 301) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Regrade request submitted successfully.",
-              },
-            ],
-          };
+        let primaryError: unknown = null;
+        let requests: GradescopeRegradeRequest[] = [];
+        try {
+          const html = await api.fetchPage(
+            `/courses/${course_id}/assignments/${assignment_id}/regrade_requests`
+          );
+          requests = parseRegradeRequests(html);
+        } catch (error) {
+          primaryError = error;
         }
 
-        if (result.status >= 200 && result.status < 300) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Regrade request submitted (status ${result.status}).`,
-              },
-            ],
-          };
+        if (requests.length === 0) {
+          try {
+            requests = await requestsFromStudentSubmissions(
+              api,
+              course_id,
+              assignment_id
+            );
+          } catch (fallbackError) {
+            if (primaryError) {
+              throw new Error(
+                `Unable to read student regrade requests: ${
+                  primaryError instanceof Error ? primaryError.message : String(primaryError)
+                }; fallback failed: ${
+                  fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                }`
+              );
+            }
+            throw fallbackError;
+          }
         }
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Regrade request returned status ${result.status}. It may not have been created. Check Gradescope to confirm.`,
-            },
-          ],
-          isError: true,
-        };
+        return toolSuccess({
+          course_id,
+          assignment_id,
+          regrade_requests: mergeRequests(requests).map(requestOutput),
+        });
       } catch (error) {
-        return {
-          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
-          isError: true,
-        };
+        return toolError(error);
       }
     }
   );

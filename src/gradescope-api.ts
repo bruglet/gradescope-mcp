@@ -1,20 +1,22 @@
 import { parse as parseHTML } from "node-html-parser";
-import * as fs from "fs/promises";
-import * as path from "path";
 
 export class GradescopeAPI {
-  private baseUrl = "https://www.gradescope.com";
-  private email: string;
-  private password: string;
-  private cookies: Map<string, string> = new Map();
+  private readonly baseUrl = "https://www.gradescope.com";
+  private readonly baseOrigin = new URL(this.baseUrl).origin;
+  private readonly email: string;
+  private readonly password: string;
+  private readonly cookies: Map<string, string> = new Map();
   private csrfToken: string | null = null;
   private authenticated = false;
   private lastRequestTime = 0;
-  private minRequestInterval = 1000; // 1 req/sec
+  private readonly minRequestInterval: number;
+  private readonly maxRedirects = 5;
+  private operationQueue: Promise<void> = Promise.resolve();
 
-  constructor(email: string, password: string) {
+  constructor(email: string, password: string, minRequestInterval = 1000) {
     this.email = email;
     this.password = password;
+    this.minRequestInterval = minRequestInterval;
   }
 
   private async throttle(): Promise<void> {
@@ -29,38 +31,62 @@ export class GradescopeAPI {
   }
 
   private extractSetCookies(response: Response): void {
-    const setCookieHeaders = response.headers.getSetCookie?.() ?? [];
+    const nativeHeaders = response.headers.getSetCookie?.() ?? [];
+    const combined = response.headers.get("set-cookie");
+    const setCookieHeaders = nativeHeaders.length > 0
+      ? nativeHeaders
+      : combined
+        ? combined.split(/,(?=\s*[^;,=\s]+=[^;,]*)/)
+        : [];
     for (const header of setCookieHeaders) {
       const match = header.match(/^([^=]+)=([^;]*)/);
-      if (match) {
-        this.cookies.set(match[1], match[2]);
-      }
+      if (match) this.cookies.set(match[1], match[2]);
     }
   }
 
   private getCookieHeader(): string {
     return Array.from(this.cookies.entries())
-      .map(([k, v]) => `${k}=${v}`)
+      .map(([key, value]) => `${key}=${value}`)
       .join("; ");
+  }
+
+  private resolveUrl(urlPath: string): string {
+    const url = new URL(urlPath, `${this.baseUrl}/`);
+    if (url.origin !== this.baseOrigin) {
+      throw new Error("Gradescope requests must remain on the same origin");
+    }
+    return url.toString();
   }
 
   private extractCSRFToken(html: string): string | null {
     const root = parseHTML(html);
     const meta = root.querySelector('meta[name="csrf-token"]');
-    if (meta) {
-      return meta.getAttribute("content") ?? null;
-    }
-    // Also check for authenticity_token in hidden inputs
+    if (meta) return meta.getAttribute("content") ?? null;
+
     const input = root.querySelector('input[name="authenticity_token"]');
-    if (input) {
-      return input.getAttribute("value") ?? null;
-    }
-    return null;
+    return input?.getAttribute("value") ?? null;
+  }
+
+  private isLoginPage(html: string): boolean {
+    const root = parseHTML(html);
+    return Boolean(
+      root.querySelector(
+        'form[action="/login"], form[action$="/login"], input[name="session[email]"], input[name="session[password]"]'
+      )
+    );
+  }
+
+  private isRedirect(response: Response): boolean {
+    return response.status >= 300 && response.status < 400;
+  }
+
+  private isLoginRedirect(response: Response): boolean {
+    if (!this.isRedirect(response)) return false;
+    return (response.headers.get("location") ?? "").includes("/login");
   }
 
   private async login(): Promise<void> {
-    // Step 1: GET the login page to get CSRF token and initial session cookie
-    const loginPageResponse = await fetch(`${this.baseUrl}/login`, {
+    const loginPageResponse = await fetch(this.resolveUrl("/login"), {
       redirect: "manual",
       headers: {
         "User-Agent": "GradescopeMCP/1.0",
@@ -70,16 +96,16 @@ export class GradescopeAPI {
     });
 
     this.extractSetCookies(loginPageResponse);
+    if (!loginPageResponse.ok) {
+      throw new Error(`Gradescope login page failed (${loginPageResponse.status})`);
+    }
     const loginHtml = await loginPageResponse.text();
     this.csrfToken = this.extractCSRFToken(loginHtml);
 
     if (!this.csrfToken) {
-      throw new Error(
-        "Failed to extract CSRF token from Gradescope login page"
-      );
+      throw new Error("Failed to extract CSRF token from Gradescope login page");
     }
 
-    // Step 2: POST login credentials
     const formBody = new URLSearchParams({
       utf8: "✓",
       authenticity_token: this.csrfToken,
@@ -90,36 +116,31 @@ export class GradescopeAPI {
       "session[remember_me_sso]": "0",
     });
 
-    const loginResponse = await fetch(`${this.baseUrl}/login`, {
+    const loginResponse = await fetch(this.resolveUrl("/login"), {
       method: "POST",
       redirect: "manual",
       headers: {
         "User-Agent": "GradescopeMCP/1.0",
         "Content-Type": "application/x-www-form-urlencoded",
         Cookie: this.getCookieHeader(),
-        Referer: `${this.baseUrl}/login`,
-        Origin: this.baseUrl,
+        Referer: this.resolveUrl("/login"),
+        Origin: this.baseOrigin,
       },
       body: formBody.toString(),
     });
 
     this.extractSetCookies(loginResponse);
 
-    // A successful login redirects (302) to the dashboard
-    if (loginResponse.status === 302 || loginResponse.status === 301) {
+    if (this.isRedirect(loginResponse)) {
       const location = loginResponse.headers.get("location");
-      if (location && (location.includes("/login") || location.includes("/sessions"))) {
-        throw new Error(
-          "Gradescope login failed: invalid email or password"
-        );
+      if (!location) {
+        throw new Error("Gradescope login succeeded without a redirect location");
       }
-      this.authenticated = true;
+      if (location.includes("/login") || location.includes("/sessions")) {
+        throw new Error("Gradescope login failed: invalid email or password");
+      }
 
-      // Follow the redirect to get updated CSRF token
-      const redirectUrl = location?.startsWith("http")
-        ? location
-        : `${this.baseUrl}${location}`;
-      const dashResponse = await fetch(redirectUrl, {
+      const dashboardResponse = await fetch(this.resolveUrl(location), {
         redirect: "manual",
         headers: {
           "User-Agent": "GradescopeMCP/1.0",
@@ -128,51 +149,68 @@ export class GradescopeAPI {
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
       });
-      this.extractSetCookies(dashResponse);
-      const dashHtml = await dashResponse.text();
-      const newToken = this.extractCSRFToken(dashHtml);
+      this.extractSetCookies(dashboardResponse);
+      if (!dashboardResponse.ok) {
+        throw new Error(`Gradescope dashboard failed (${dashboardResponse.status})`);
+      }
+      const dashboardHtml = await dashboardResponse.text();
+      if (this.isLoginPage(dashboardHtml)) {
+        throw new Error("Gradescope authentication returned the login page");
+      }
+      const newToken = this.extractCSRFToken(dashboardHtml);
       if (newToken) this.csrfToken = newToken;
-    } else if (loginResponse.status === 200) {
-      // 200 means the login page was re-rendered (failed login)
+      this.authenticated = true;
+      return;
+    }
+
+    if (loginResponse.status === 200) {
       const body = await loginResponse.text();
       if (
+        this.isLoginPage(body) ||
         body.includes("Invalid email/password") ||
         body.includes("invalid") ||
         body.includes("error")
       ) {
         throw new Error("Gradescope login failed: invalid email or password");
       }
-      // Some cases 200 means success with inline redirect
       this.authenticated = true;
-    } else {
-      throw new Error(
-        `Gradescope login failed with status ${loginResponse.status}`
-      );
+      return;
     }
+
+    throw new Error(`Gradescope login failed with status ${loginResponse.status}`);
   }
 
   private async ensureAuthenticated(): Promise<void> {
-    if (!this.authenticated) {
-      await this.login();
-    }
-  }
-
-  private isLoginRedirect(response: Response): boolean {
-    if (response.status === 302 || response.status === 301) {
-      const location = response.headers.get("location") ?? "";
-      return location.includes("/login");
-    }
-    return false;
+    if (!this.authenticated) await this.login();
   }
 
   async fetchPage(urlPath: string): Promise<string> {
+    const previous = this.operationQueue;
+    let release!: () => void;
+    this.operationQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous.catch(() => undefined);
+    try {
+      return await this.fetchPageWithRedirects(urlPath, 0);
+    } finally {
+      release();
+    }
+  }
+
+  private async fetchPageWithRedirects(
+    urlPath: string,
+    redirectDepth: number
+  ): Promise<string> {
+    if (redirectDepth > this.maxRedirects) {
+      throw new Error("Gradescope returned too many redirects");
+    }
+
     await this.ensureAuthenticated();
     await this.throttle();
 
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
+    const url = this.resolveUrl(urlPath);
     const response = await fetch(url, {
       redirect: "manual",
       headers: {
@@ -185,343 +223,31 @@ export class GradescopeAPI {
 
     this.extractSetCookies(response);
 
-    // Handle redirects
-    if (response.status === 302 || response.status === 301) {
+    if (this.isRedirect(response)) {
       const location = response.headers.get("location");
-      if (location?.includes("/login")) {
-        // Session expired, re-authenticate
+      if (!location) throw new Error("Gradescope returned a redirect without a location");
+
+      const redirectUrl = this.resolveUrl(location);
+      if (this.isLoginRedirect(response)) {
         this.authenticated = false;
         await this.login();
-        return this.fetchPage(urlPath);
+        return this.fetchPageWithRedirects(urlPath, redirectDepth + 1);
       }
-      // Follow non-login redirects
-      const redirectUrl = location?.startsWith("http")
-        ? location
-        : `${this.baseUrl}${location}`;
-      return this.fetchPage(redirectUrl);
+      return this.fetchPageWithRedirects(redirectUrl, redirectDepth + 1);
     }
 
     if (!response.ok) {
-      throw new Error(
-        `Gradescope GET ${urlPath} failed (${response.status})`
-      );
+      throw new Error(`Gradescope GET ${urlPath} failed (${response.status})`);
     }
 
     const html = await response.text();
-
-    // Update CSRF token from response
+    if (this.isLoginPage(html)) {
+      this.authenticated = false;
+      await this.login();
+      return this.fetchPageWithRedirects(urlPath, redirectDepth + 1);
+    }
     const newToken = this.extractCSRFToken(html);
     if (newToken) this.csrfToken = newToken;
-
     return html;
-  }
-
-  async fetchJSON<T>(urlPath: string): Promise<T> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const response = await fetch(url, {
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        Cookie: this.getCookieHeader(),
-        Accept: "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-      },
-    });
-
-    this.extractSetCookies(response);
-
-    if (this.isLoginRedirect(response)) {
-      this.authenticated = false;
-      await this.login();
-      return this.fetchJSON(urlPath);
-    }
-
-    if (!response.ok) {
-      let detail = "";
-      try {
-        detail = await response.text();
-      } catch {
-        detail = "Unknown error";
-      }
-      throw new Error(
-        `Gradescope GET ${urlPath} failed (${response.status}): ${detail}`
-      );
-    }
-
-    return (await response.json()) as T;
-  }
-
-  async fetchRaw(urlPath: string): Promise<{ data: Buffer; contentType: string }> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const response = await fetch(url, {
-      redirect: "follow",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        Cookie: this.getCookieHeader(),
-      },
-    });
-
-    this.extractSetCookies(response);
-
-    if (!response.ok) {
-      throw new Error(
-        `Gradescope GET ${urlPath} failed (${response.status})`
-      );
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    return {
-      data: Buffer.from(arrayBuffer),
-      contentType: response.headers.get("content-type") ?? "application/octet-stream",
-    };
-  }
-
-  async postForm(
-    urlPath: string,
-    data: Record<string, string>
-  ): Promise<{ html: string; status: number; location: string | null }> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const formBody = new URLSearchParams({
-      utf8: "✓",
-      authenticity_token: this.csrfToken ?? "",
-      ...data,
-    });
-
-    const response = await fetch(url, {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: this.getCookieHeader(),
-        "X-CSRF-Token": this.csrfToken ?? "",
-        Referer: url,
-        Origin: this.baseUrl,
-      },
-      body: formBody.toString(),
-    });
-
-    this.extractSetCookies(response);
-
-    const html = await response.text();
-    const newToken = this.extractCSRFToken(html);
-    if (newToken) this.csrfToken = newToken;
-
-    return {
-      html,
-      status: response.status,
-      location: response.headers.get("location"),
-    };
-  }
-
-  async postJSON<T>(
-    urlPath: string,
-    data: Record<string, unknown>
-  ): Promise<T> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        "Content-Type": "application/json",
-        Cookie: this.getCookieHeader(),
-        "X-CSRF-Token": this.csrfToken ?? "",
-        "X-Requested-With": "XMLHttpRequest",
-        Accept: "application/json",
-        Referer: url,
-        Origin: this.baseUrl,
-      },
-      body: JSON.stringify(data),
-    });
-
-    this.extractSetCookies(response);
-
-    if (this.isLoginRedirect(response)) {
-      this.authenticated = false;
-      await this.login();
-      return this.postJSON(urlPath, data);
-    }
-
-    if (!response.ok) {
-      let detail = "";
-      try {
-        detail = await response.text();
-      } catch {
-        detail = "Unknown error";
-      }
-      throw new Error(
-        `Gradescope POST ${urlPath} failed (${response.status}): ${detail}`
-      );
-    }
-
-    return (await response.json()) as T;
-  }
-
-  async putJSON<T>(
-    urlPath: string,
-    data: Record<string, unknown>
-  ): Promise<T> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const response = await fetch(url, {
-      method: "PUT",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        "Content-Type": "application/json",
-        Cookie: this.getCookieHeader(),
-        "X-CSRF-Token": this.csrfToken ?? "",
-        "X-Requested-With": "XMLHttpRequest",
-        Accept: "application/json",
-        Referer: url,
-        Origin: this.baseUrl,
-      },
-      body: JSON.stringify(data),
-    });
-
-    this.extractSetCookies(response);
-
-    if (!response.ok) {
-      let detail = "";
-      try {
-        detail = await response.text();
-      } catch {
-        detail = "Unknown error";
-      }
-      throw new Error(
-        `Gradescope PUT ${urlPath} failed (${response.status}): ${detail}`
-      );
-    }
-
-    return (await response.json()) as T;
-  }
-
-  async postMultipart(
-    urlPath: string,
-    filePaths: string[],
-    additionalFields?: Record<string, string>
-  ): Promise<{ html: string; status: number; location: string | null }> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const formData = new FormData();
-    formData.append("utf8", "✓");
-    formData.append("authenticity_token", this.csrfToken ?? "");
-
-    if (additionalFields) {
-      for (const [key, value] of Object.entries(additionalFields)) {
-        formData.append(key, value);
-      }
-    }
-
-    for (const filePath of filePaths) {
-      const fileBuffer = await fs.readFile(filePath);
-      const fileName = path.basename(filePath);
-      const blob = new Blob([fileBuffer]);
-      formData.append("submission[files][]", blob, fileName);
-    }
-
-    const response = await fetch(url, {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        Cookie: this.getCookieHeader(),
-        "X-CSRF-Token": this.csrfToken ?? "",
-        Referer: url,
-        Origin: this.baseUrl,
-      },
-      body: formData,
-    });
-
-    this.extractSetCookies(response);
-
-    const html = await response.text();
-    const newToken = this.extractCSRFToken(html);
-    if (newToken) this.csrfToken = newToken;
-
-    return {
-      html,
-      status: response.status,
-      location: response.headers.get("location"),
-    };
-  }
-
-  async patchJSON<T>(
-    urlPath: string,
-    data: Record<string, unknown>
-  ): Promise<T> {
-    await this.ensureAuthenticated();
-    await this.throttle();
-
-    const url = urlPath.startsWith("http")
-      ? urlPath
-      : `${this.baseUrl}${urlPath}`;
-
-    const response = await fetch(url, {
-      method: "PATCH",
-      redirect: "manual",
-      headers: {
-        "User-Agent": "GradescopeMCP/1.0",
-        "Content-Type": "application/json",
-        Cookie: this.getCookieHeader(),
-        "X-CSRF-Token": this.csrfToken ?? "",
-        "X-Requested-With": "XMLHttpRequest",
-        Accept: "application/json",
-        Referer: url,
-        Origin: this.baseUrl,
-      },
-      body: JSON.stringify(data),
-    });
-
-    this.extractSetCookies(response);
-
-    if (!response.ok) {
-      let detail = "";
-      try {
-        detail = await response.text();
-      } catch {
-        detail = "Unknown error";
-      }
-      throw new Error(
-        `Gradescope PATCH ${urlPath} failed (${response.status}): ${detail}`
-      );
-    }
-
-    return (await response.json()) as T;
   }
 }

@@ -1,639 +1,498 @@
 import { parse as parseHTML, type HTMLElement } from "node-html-parser";
 import type {
-  GradescopeCourse,
   GradescopeAssignment,
-  GradescopeAssignmentDetail,
+  GradescopeCourse,
+  GradescopeQuestionResult,
+  GradescopeRegradeRequest,
+  GradescopeRubricItem,
   GradescopeSubmission,
   GradescopeSubmissionDetail,
-  GradescopeQuestionResult,
-  GradescopeRubricItem,
-  GradescopeRosterEntry,
-  GradescopeExtension,
-  GradescopeRegradeRequest,
-  GradescopeGradeEntry,
-  GradescopeQuestionOutline,
+  NormalizedRegradeStatus,
+  NormalizedSubmissionStatus,
 } from "./types.js";
 
-function textContent(el: HTMLElement | null): string {
-  return el?.textContent?.trim() ?? "";
+type CourseRole = GradescopeCourse["role"];
+
+function textContent(element: HTMLElement | null): string {
+  return (element?.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+function nullableText(value: string | null | undefined): string | null {
+  const trimmed = value?.replace(/\s+/g, " ").trim();
+  return trimmed ? trimmed : null;
+}
+
+function valueContent(element: HTMLElement | null): string | null {
+  if (!element) return null;
+  const machineValue = element.querySelector("time[datetime]")?.getAttribute("datetime");
+  return nullableText(machineValue ?? textContent(element));
 }
 
 function parseNumber(text: string): number | null {
-  const cleaned = text.replace(/[^0-9.\-]/g, "");
-  const num = parseFloat(cleaned);
-  return isNaN(num) ? null : num;
+  const match = text.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const number = Number.parseFloat(match[0]);
+  return Number.isNaN(number) ? null : number;
 }
 
-export function extractCSRFToken(html: string): string | null {
-  const root = parseHTML(html);
-  const meta = root.querySelector('meta[name="csrf-token"]');
-  if (meta) return meta.getAttribute("content") ?? null;
-  const input = root.querySelector('input[name="authenticity_token"]');
-  if (input) return input.getAttribute("value") ?? null;
+function parseScore(text: string): { score: number; maxScore: number } | null {
+  const match = text.replace(/,/g, "").match(/(-?\d+(?:\.\d+)?)\s*\/\s*(-?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const score = Number.parseFloat(match[1]);
+  const maxScore = Number.parseFloat(match[2]);
+  return Number.isNaN(score) || Number.isNaN(maxScore) ? null : { score, maxScore };
+}
+
+function normalizedHeader(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function headerNames(row: HTMLElement): string[] {
+  const table = row.closest("table");
+  const headerRow = table?.querySelector("thead tr") ?? table?.querySelector("tr");
+  if (!headerRow || headerRow === row) return [];
+  return headerRow.querySelectorAll("th, td").map((cell) => normalizedHeader(textContent(cell)));
+}
+
+function cellByHeader(
+  cells: HTMLElement[],
+  headers: string[],
+  matcher: RegExp
+): HTMLElement | null {
+  const index = headers.findIndex((header) => matcher.test(header));
+  return index >= 0 ? cells[index] ?? null : null;
+}
+
+function cellByClass(cells: HTMLElement[], matcher: RegExp): HTMLElement | null {
+  return (
+    cells.find((cell) => matcher.test((cell.getAttribute("class") ?? "").toLowerCase())) ??
+    null
+  );
+}
+
+function firstMatchingCell(
+  cells: HTMLElement[],
+  headers: string[],
+  headerMatcher: RegExp,
+  classMatcher: RegExp
+): HTMLElement | null {
+  return cellByHeader(cells, headers, headerMatcher) ?? cellByClass(cells, classMatcher);
+}
+
+function statusFromRaw(raw: string | null): NormalizedSubmissionStatus {
+  if (!raw) return "unknown";
+  const value = raw.toLowerCase();
+  if (/not submitted|unsubmitted|no submission|missing/.test(value)) return "unsubmitted";
+  if (/graded|score released|returned/.test(value)) return "graded";
+  if (/submitted|turned in|on time|late/.test(value)) return "submitted";
+  return "unknown";
+}
+
+function submittedFromStatus(status: NormalizedSubmissionStatus): boolean | null {
+  if (status === "submitted" || status === "graded") return true;
+  if (status === "unsubmitted") return false;
   return null;
+}
+
+function lateFromText(values: Array<string | null>): boolean | null {
+  const text = values.filter(Boolean).join(" ").toLowerCase();
+  if (/\blate\b|overdue/.test(text)) return true;
+  if (/\bon time\b|on-time|not late/.test(text)) return false;
+  return null;
+}
+
+function roleFromHeading(value: string): CourseRole {
+  const heading = value.toLowerCase();
+  if (heading.includes("instructor")) return "instructor";
+  if (heading.includes("teaching assistant") || /\bta\b/.test(heading)) return "ta";
+  if (heading.includes("student")) return "student";
+  return "unknown";
+}
+
+function parseCourseList(
+  courseList: HTMLElement,
+  role: CourseRole,
+  courses: GradescopeCourse[],
+  seenIds: Set<string>,
+  inheritedTerm: string | null = null
+): void {
+  let currentTerm = inheritedTerm;
+  for (const child of courseList.childNodes) {
+    const element = child as HTMLElement;
+    if (!element || !("classList" in element)) continue;
+
+    if (element.classList.contains("courseList--term")) {
+      currentTerm = nullableText(textContent(element));
+      continue;
+    }
+
+    if (element.classList.contains("courseList--coursesForTerm")) {
+      for (const card of element.querySelectorAll("a.courseBox")) {
+        const href = card.getAttribute("href") ?? "";
+        const id = href.match(/\/courses\/(\d+)/)?.[1];
+        if (!id || seenIds.has(id)) continue;
+
+        const shortName = textContent(card.querySelector(".courseBox--shortname"));
+        const fullName = textContent(card.querySelector(".courseBox--name"));
+        seenIds.add(id);
+        courses.push({
+          id,
+          name: fullName || shortName,
+          shortName: shortName || fullName,
+          term: currentTerm,
+          role,
+          url: href,
+        });
+      }
+      continue;
+    }
+
+    if (element.classList.contains("courseList--inactiveCourses")) {
+      parseCourseList(element, role, courses, seenIds, currentTerm);
+    }
+  }
 }
 
 export function parseDashboard(html: string): GradescopeCourse[] {
   const root = parseHTML(html);
-  const courses: GradescopeCourse[] = [];
+  const account = root.querySelector("#account-show") ?? root;
+  const roleMap = new Map<HTMLElement, CourseRole>();
 
-  // Gradescope dashboard structure:
-  //   <h2 class="pageHeading">Instructor Courses</h2>
-  //   <div class="courseList">
-  //     <div class="courseList--term">Summer 2025</div>
-  //     <div class="courseList--coursesForTerm">
-  //       <a class="courseBox" href="/courses/123">  <-- the card IS the <a> tag
-  //         <h3 class="courseBox--shortname">CSE101</h3>
-  //         <div class="courseBox--name">Full Name</div>
-  //       </a>
-  //     </div>
-  //   </div>
-  //   <h2 class="pageHeading">Student Courses</h2>
-  //   ...
-
-  // First, build a map of courseList divs to their role based on preceding h2
-  const accountShow = root.querySelector("#account-show") ?? root;
-  const headings = accountShow.querySelectorAll("h2.pageHeading");
-  const roleMap = new Map<HTMLElement, "student" | "instructor" | "ta" | "unknown">();
-
-  for (const h2 of headings) {
-    const headingText = textContent(h2).toLowerCase();
-    let role: "student" | "instructor" | "ta" | "unknown" = "unknown";
-    if (headingText.includes("instructor")) role = "instructor";
-    else if (headingText.includes("student")) role = "student";
-    else if (headingText.includes("ta") || headingText.includes("teaching assistant")) role = "ta";
-
-    // The courseList div follows this heading as a sibling
-    let sibling = h2.nextElementSibling;
+  for (const heading of account.querySelectorAll("h2.pageHeading, h2")) {
+    const role = roleFromHeading(textContent(heading));
+    let sibling = heading.nextElementSibling;
     while (sibling) {
-      if (sibling.classList?.contains("courseList")) {
-        roleMap.set(sibling as HTMLElement, role);
+      if (sibling.classList.contains("courseList")) {
+        roleMap.set(sibling, role);
         break;
       }
-      // Stop if we hit another heading
       if (sibling.tagName === "H2") break;
       sibling = sibling.nextElementSibling;
     }
   }
 
-  // Now iterate each courseList and extract courses
-  const courseLists = accountShow.querySelectorAll(".courseList");
-  for (const courseList of courseLists) {
-    const role = roleMap.get(courseList as HTMLElement) ?? "unknown";
+  // Current student account pages may label the document "Your Courses"
+  // without rendering a textual "Student Courses" section heading. In that
+  // specific shape, unlabelled course lists are the student's own courses.
+  // Keep the fallback disabled when an explicit instructor/TA section exists
+  // so role separation remains fail-closed.
+  const pageTitle = textContent(root.querySelector("title")).toLowerCase();
+  const hasExplicitNonStudentSection = [...roleMap.values()].some(
+    (role) => role === "instructor" || role === "ta"
+  );
+  const useStudentDashboardFallback =
+    /\byour courses\b/.test(pageTitle) && !hasExplicitNonStudentSection;
 
-    // Track current term as we iterate children
-    let currentTerm = "";
-    const children = courseList.childNodes;
-    for (const child of children) {
-      if (!(child instanceof Object && "classList" in child)) continue;
-      const el = child as HTMLElement;
-
-      if (el.classList?.contains("courseList--term")) {
-        currentTerm = textContent(el);
-      } else if (el.classList?.contains("courseList--coursesForTerm")) {
-        // Each <a class="courseBox"> inside is a course
-        const cards = el.querySelectorAll("a.courseBox");
-        for (const card of cards) {
-          const href = card.getAttribute("href") ?? "";
-          const idMatch = href.match(/\/courses\/(\d+)/);
-          if (!idMatch) continue;
-
-          const shortName = textContent(card.querySelector(".courseBox--shortname"));
-          const fullName = textContent(card.querySelector(".courseBox--name"));
-          const assignmentsText = textContent(card.querySelector(".courseBox--assignments"));
-
-          courses.push({
-            id: idMatch[1],
-            name: fullName || shortName,
-            shortName: shortName || fullName,
-            term: currentTerm,
-            role,
-            url: href,
-          });
-        }
-      } else if (el.classList?.contains("courseList--inactiveCourses")) {
-        // Inactive/older courses are nested inside this div with the same term + coursesForTerm pattern
-        let inactiveTerm = "";
-        for (const inChild of el.childNodes) {
-          if (!(inChild instanceof Object && "classList" in inChild)) continue;
-          const inEl = inChild as HTMLElement;
-
-          if (inEl.classList?.contains("courseList--term")) {
-            inactiveTerm = textContent(inEl);
-          } else if (inEl.classList?.contains("courseList--coursesForTerm")) {
-            const cards = inEl.querySelectorAll("a.courseBox");
-            for (const card of cards) {
-              const href = card.getAttribute("href") ?? "";
-              const idMatch = href.match(/\/courses\/(\d+)/);
-              if (!idMatch) continue;
-
-              const shortName = textContent(card.querySelector(".courseBox--shortname"));
-              const fullName = textContent(card.querySelector(".courseBox--name"));
-
-              courses.push({
-                id: idMatch[1],
-                name: fullName || shortName,
-                shortName: shortName || fullName,
-                term: inactiveTerm,
-                role,
-                url: href,
-              });
-            }
-          }
-        }
-      }
-    }
+  const courses: GradescopeCourse[] = [];
+  const seenIds = new Set<string>();
+  for (const courseList of account.querySelectorAll(".courseList")) {
+    const mappedRole = roleMap.get(courseList);
+    const role =
+      mappedRole === "unknown" && useStudentDashboardFallback
+        ? "student"
+        : mappedRole ?? (useStudentDashboardFallback ? "student" : "unknown");
+    parseCourseList(courseList, role, courses, seenIds);
   }
-
   return courses;
+}
+
+function assignmentType(row: HTMLElement, href: string): string {
+  const typeElement = row.querySelector(".assignment-type, [class*='type'], .badge");
+  const type = nullableText(textContent(typeElement));
+  if (type) return type.toLowerCase();
+  if (href.includes("programming")) return "programming";
+  if (href.includes("online")) return "online";
+  return "unknown";
+}
+
+function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
+  const link = row.querySelector('a[href*="/assignments/"]');
+  const href = link?.getAttribute("href") ?? "";
+  const id = href.match(/\/assignments\/(\d+)/)?.[1];
+  if (!id) return null;
+
+  const cells = row.querySelectorAll("td, th");
+  const headers = headerNames(row);
+  const rowText = textContent(row);
+
+  const lateDueCell = firstMatchingCell(
+    cells,
+    headers,
+    /late due|late deadline|late submission deadline/,
+    /late.*due|late.*deadline|late.*date/
+  );
+  const dueCell = firstMatchingCell(
+    cells,
+    headers,
+    /^(?!.*late).*(due|deadline)/,
+    /due|deadline|date/
+  );
+  const statusCell = firstMatchingCell(cells, headers, /(^| )status($| )/, /status|submission/);
+  const scoreCell = firstMatchingCell(cells, headers, /score|grade|points/, /score|grade|points/);
+  const submittedAtCell = firstMatchingCell(
+    cells,
+    headers,
+    /submitted at|submission time|timestamp/,
+    /submitted|timestamp|time/
+  );
+  const lateCell = firstMatchingCell(
+    cells,
+    headers,
+    /^(?!.*due).*(late|lateness|overdue)/,
+    /late(?!.*due)|lateness/
+  );
+
+  const statusRaw = nullableText(valueContent(statusCell));
+  const status = statusFromRaw(statusRaw);
+  const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
+  const score = scoreText ? parseScore(scoreText) : null;
+  const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const late = lateFromText([lateText, statusRaw]);
+
+  return {
+    id,
+    name: textContent(link),
+    type: assignmentType(row, href),
+    dueDate: valueContent(dueCell),
+    lateDueDate: valueContent(lateDueCell),
+    released: !row.querySelector(".unreleased, .draft") && !/\bunreleased\b/i.test(rowText),
+    submissionStatus: status,
+    statusRaw,
+    submitted: submittedFromStatus(status),
+    submittedAt: valueContent(submittedAtCell),
+    late,
+    lateness: lateText,
+    pointsPossible: score?.maxScore ?? null,
+    pointsAwarded: score?.score ?? null,
+    url: href,
+  };
 }
 
 export function parseAssignmentList(html: string): GradescopeAssignment[] {
   const root = parseHTML(html);
   const assignments: GradescopeAssignment[] = [];
+  const seenIds = new Set<string>();
 
-  // Gradescope assignments page has a table with assignment rows
-  const rows = root.querySelectorAll(
-    "tr[class*='assignment'], .assignment-row, tbody tr"
-  );
-
-  for (const row of rows) {
-    const link = row.querySelector('a[href*="/assignments/"]');
-    if (!link) continue;
-
-    const href = link.getAttribute("href") ?? "";
-    const idMatch = href.match(/\/assignments\/(\d+)/);
-    if (!idMatch) continue;
-
-    const name = textContent(link);
-    const cells = row.querySelectorAll("td, th");
-
-    // Extract data from table cells
-    let dueDate: string | null = null;
-    let submissionStatus: string | null = null;
-    let pointsAwarded: number | null = null;
-    let pointsPossible: number | null = null;
-
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      // Due date detection
-      if (
-        cls.includes("due") ||
-        cls.includes("date") ||
-        text.match(/\d{4}-\d{2}-\d{2}/) ||
-        text.match(/\w{3}\s+\d{1,2},?\s+\d{4}/)
-      ) {
-        if (!dueDate && text.match(/\d/)) {
-          dueDate = text;
-        }
-      }
-
-      // Status detection
-      if (
-        cls.includes("status") ||
-        cls.includes("submission") ||
-        text.match(/submitted|graded|not submitted|missing/i)
-      ) {
-        submissionStatus = text;
-      }
-
-      // Score detection (e.g., "85 / 100" or "85/100")
-      const scoreMatch = text.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-      if (scoreMatch) {
-        pointsAwarded = parseNumber(scoreMatch[1]);
-        pointsPossible = parseNumber(scoreMatch[2]);
-      }
-    }
-
-    // Check for released/unreleased indicators
-    const released = !row.querySelector(".unreleased, .draft") &&
-      !textContent(row).toLowerCase().includes("unreleased");
-
-    // Try to detect assignment type from icons or badges
-    let type = "unknown";
-    const typeEl =
-      row.querySelector(".assignment-type, [class*='type']") ??
-      row.querySelector(".badge");
-    if (typeEl) {
-      type = textContent(typeEl).toLowerCase() || "unknown";
-    }
-    if (href.includes("programming")) type = "programming";
-    else if (href.includes("online")) type = "online";
-
-    assignments.push({
-      id: idMatch[1],
-      name,
-      type,
-      dueDate,
-      lateDueDate: null,
-      released,
-      submissionStatus,
-      pointsPossible,
-      pointsAwarded,
-      url: href,
-    });
+  for (const row of root.querySelectorAll("tr, .assignment-row")) {
+    const assignment = assignmentFromRow(row);
+    if (!assignment || seenIds.has(assignment.id)) continue;
+    seenIds.add(assignment.id);
+    assignments.push(assignment);
   }
-
   return assignments;
 }
 
-export function parseAssignmentDetail(html: string): Partial<GradescopeAssignmentDetail> {
-  const root = parseHTML(html);
-
-  const instructions =
-    textContent(
-      root.querySelector(".assignment-instructions, .instructions, [class*='description']")
-    ) || null;
-
-  const totalPointsEl = root.querySelector(
-    "[class*='total-points'], [class*='points'], .points"
+function submissionContainer(link: HTMLElement): HTMLElement {
+  return (
+    link.closest("tr") ??
+    link.closest(".submission-row") ??
+    link.closest("[class*='submission-card']") ??
+    link.closest("[class*='submission']") ??
+    link
   );
-  const totalPointsText = textContent(totalPointsEl);
-  const totalPoints = parseNumber(totalPointsText);
+}
 
-  // Parse question outline
-  const questions: GradescopeQuestionOutline[] = [];
-  const questionEls = root.querySelectorAll(
-    ".question-outline-row, [class*='question'], .rubric-question"
+function submissionFromContainer(
+  container: HTMLElement,
+  id: string,
+  url: string
+): GradescopeSubmission {
+  const cells = container.querySelectorAll("td, th");
+  const headers = headerNames(container);
+  const containerText = textContent(container);
+  const statusCell = firstMatchingCell(cells, headers, /(^| )status($| )/, /status|submission/);
+  const scoreCell = firstMatchingCell(cells, headers, /score|grade|points/, /score|grade|points/);
+  const submittedAtCell = firstMatchingCell(
+    cells,
+    headers,
+    /submitted at|submission time|timestamp|submitted/,
+    /submitted|timestamp|time|date/
   );
-  for (const qEl of questionEls) {
-    const qName =
-      textContent(qEl.querySelector(".question-title, .name, th")) || textContent(qEl);
-    const qMaxText = textContent(qEl.querySelector("[class*='point'], .max-score"));
-    const qMax = parseNumber(qMaxText);
-    if (qName) {
-      questions.push({ name: qName, maxScore: qMax });
-    }
-  }
+  const lateCell = firstMatchingCell(cells, headers, /late|lateness/, /late|lateness/);
 
-  // Detect submission type
-  let submissionType: string | null = null;
-  const formEl = root.querySelector(
-    "form[class*='submission'], [class*='upload'], [class*='submit']"
-  );
-  if (formEl) {
-    const formText = textContent(formEl).toLowerCase();
-    if (formText.includes("pdf")) submissionType = "pdf";
-    else if (formText.includes("image")) submissionType = "image";
-    else if (formText.includes("code") || formText.includes("programming"))
-      submissionType = "code";
-    else submissionType = "file";
-  }
-
-  const groupSubmission =
-    !!root.querySelector("[class*='group'], [class*='team']") ||
-    html.toLowerCase().includes("group submission");
+  const statusRaw = nullableText(valueContent(statusCell));
+  const status = statusFromRaw(statusRaw);
+  const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
+  const score = scoreText ? parseScore(scoreText) : null;
+  const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const late = lateFromText([lateText, statusRaw]);
+  const submittedAt =
+    valueContent(submittedAtCell) ??
+    valueContent(container.querySelector("time[datetime]"));
 
   return {
-    instructions,
-    totalPoints,
-    submissionType,
-    groupSubmission,
-    questions,
+    id,
+    score: score?.score ?? null,
+    maxScore: score?.maxScore ?? null,
+    submissionStatus: status,
+    statusRaw: statusRaw ?? (/(submitted|graded|missing|late|not submitted)/i.test(containerText) ? containerText : null),
+    submitted: submittedFromStatus(status),
+    submittedAt,
+    late,
+    lateness: lateText,
+    url,
   };
 }
 
 export function parseSubmissionList(html: string): GradescopeSubmission[] {
   const root = parseHTML(html);
   const submissions: GradescopeSubmission[] = [];
+  const seenIds = new Set<string>();
 
-  const rows = root.querySelectorAll("tbody tr, .submission-row");
-
-  for (const row of rows) {
-    const link = row.querySelector('a[href*="/submissions/"]');
-    const href = link?.getAttribute("href") ?? "";
-    const idMatch = href.match(/\/submissions\/(\d+)/);
-    if (!idMatch) continue;
-
-    const cells = row.querySelectorAll("td");
-    const name = cells.length > 0 ? textContent(cells[0]) : textContent(link);
-    let email: string | null = null;
-    let score: number | null = null;
-    let maxScore: number | null = null;
-    let status = "";
-    let submittedAt: string | null = null;
-    let lateness: string | null = null;
-
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      // Email
-      if (text.includes("@")) {
-        email = text;
-      }
-
-      // Score
-      const scoreMatch = text.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-      if (scoreMatch) {
-        score = parseNumber(scoreMatch[1]);
-        maxScore = parseNumber(scoreMatch[2]);
-      }
-
-      // Status
-      if (cls.includes("status") || text.match(/graded|submitted|missing/i)) {
-        status = text;
-      }
-
-      // Submitted at (time)
-      if (cls.includes("time") || cls.includes("date") || cls.includes("submitted")) {
-        if (text.match(/\d/) && !text.includes("/")) {
-          submittedAt = text;
-        }
-      }
-
-      // Late
-      if (cls.includes("late") || text.toLowerCase().includes("late")) {
-        lateness = text;
-      }
-    }
-
-    submissions.push({
-      id: idMatch[1],
-      studentName: name || null,
-      studentEmail: email,
-      score,
-      maxScore,
-      status,
-      submittedAt,
-      lateness,
-      url: href,
-    });
+  for (const link of root.querySelectorAll('a[href*="/submissions/"]')) {
+    const href = link.getAttribute("href") ?? "";
+    const id = href.match(/\/submissions\/(\d+)/)?.[1];
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
+    submissions.push(submissionFromContainer(submissionContainer(link), id, href));
   }
-
   return submissions;
 }
 
-export function parseSubmissionDetail(html: string): Partial<GradescopeSubmissionDetail> {
-  const root = parseHTML(html);
+function questionSections(root: HTMLElement): HTMLElement[] {
+  const primary = root.querySelectorAll(".question, [data-question-id], .rubric-question");
+  return primary.length > 0 ? primary : root.querySelectorAll("[class*='question-']");
+}
 
-  // Parse overall score
-  const scoreEl = root.querySelector(
-    ".submissionOutline--score, [class*='total-score'], .score"
-  );
-  const scoreText = textContent(scoreEl);
-  const overallMatch = scoreText.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-  const score = overallMatch ? parseNumber(overallMatch[1]) : null;
-  const maxScore = overallMatch ? parseNumber(overallMatch[2]) : null;
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
 
-  // Parse questions with rubric feedback
+function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
   const questions: GradescopeQuestionResult[] = [];
-  const questionSections = root.querySelectorAll(
-    ".question, [class*='question-'], .rubricItem--container"
-  );
+  const seen = new Set<string>();
 
-  for (const section of questionSections) {
-    const qName = textContent(
-      section.querySelector(".question-title, .name, h3, h4")
+  for (const section of questionSections(root)) {
+    const name = nullableText(
+      textContent(section.querySelector(".question-title, .name, h3, h4")) || textContent(section)
     );
+    if (!name) continue;
 
-    const qScoreEl = section.querySelector("[class*='score'], .points");
-    const qScoreText = textContent(qScoreEl);
-    const qScoreMatch = qScoreText.match(/([\d.]+)\s*\/\s*([\d.]+)/);
+    const scoreElement = section.querySelector("[class*='score'], .points");
+    const score = parseScore(textContent(scoreElement));
+    const key = `${name}|${score?.score ?? ""}|${score?.maxScore ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     const rubricItems: GradescopeRubricItem[] = [];
-    const rubricEls = section.querySelectorAll(
+    for (const rubric of section.querySelectorAll(
       ".rubricItem, [class*='rubric-item'], .rubric-row"
-    );
-    for (const ri of rubricEls) {
-      const desc = textContent(
-        ri.querySelector(".rubricItem--description, .description, td:first-child")
+    )) {
+      const description = nullableText(
+        textContent(rubric.querySelector(".rubricItem--description, .description, td:first-child"))
       );
-      const ptText = textContent(
-        ri.querySelector(".rubricItem--points, .points, td:last-child")
-      );
-      const pts = parseNumber(ptText) ?? 0;
+      if (!description) continue;
+      const points = parseNumber(
+        textContent(rubric.querySelector(".rubricItem--points, .points, td:last-child"))
+      ) ?? 0;
+      const className = rubric.getAttribute("class") ?? "";
       const applied =
-        !!ri.querySelector(".rubricItem--selected, .selected, .applied, .checked") ||
-        ri.classNames?.includes("selected") ||
-        ri.getAttribute("class")?.includes("selected") ||
-        false;
-
-      if (desc) {
-        rubricItems.push({ description: desc, points: pts, applied });
-      }
+        !!rubric.querySelector(".rubricItem--selected, .selected, .applied, .checked") ||
+        /selected|applied|checked/.test(className);
+      rubricItems.push({ description, points, applied });
     }
 
-    // Comments
-    const comments: string[] = [];
-    const commentEls = section.querySelectorAll(
-      ".comment, [class*='comment'], .annotation"
+    const comments = uniqueStrings(
+      section
+        .querySelectorAll(".comment, [class*='comment'], .annotation")
+        .map((comment) => textContent(comment))
     );
-    for (const c of commentEls) {
-      const ct = textContent(c);
-      if (ct) comments.push(ct);
-    }
 
-    if (qName) {
-      questions.push({
-        name: qName,
-        score: qScoreMatch ? parseNumber(qScoreMatch[1]) : null,
-        maxScore: qScoreMatch ? parseNumber(qScoreMatch[2]) : null,
-        rubricItems,
-        comments,
-      });
-    }
+    questions.push({
+      name,
+      score: score?.score ?? null,
+      maxScore: score?.maxScore ?? null,
+      rubricItems,
+      comments,
+    });
   }
-
-  return { score, maxScore, questions };
+  return questions;
 }
 
-export function parseRoster(html: string): GradescopeRosterEntry[] {
+export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail {
   const root = parseHTML(html);
-  const roster: GradescopeRosterEntry[] = [];
+  const summary = root.querySelector(
+    ".submissionOutline, [class*='submission-outline'], main"
+  ) ?? root;
+  const scoreElement = summary.querySelector(
+    ".submissionOutline--score, [class*='total-score'], .score"
+  );
+  const score = parseScore(textContent(scoreElement));
+  const statusElement = summary.querySelector(
+    ".submissionStatus, [data-status], [class*='status']"
+  );
+  const statusRaw = nullableText(valueContent(statusElement));
+  const submissionStatus = statusFromRaw(statusRaw);
+  const lateElement = summary.querySelector("[class*='late'], [class*='lateness']");
+  const lateText = valueContent(lateElement) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
 
-  const rows = root.querySelectorAll("tbody tr");
-
-  for (const row of rows) {
-    const cells = row.querySelectorAll("td");
-    if (cells.length < 2) continue;
-
-    let name = "";
-    let email = "";
-    let role = "";
-    let studentId: string | null = null;
-    const sections: string[] = [];
-
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      if (cls.includes("name") || (!name && !text.includes("@") && text.length > 1)) {
-        if (!name) name = text;
-      }
-      if (text.includes("@")) {
-        email = text;
-      }
-      if (cls.includes("role") || text.match(/^(student|instructor|ta|grader)$/i)) {
-        role = text;
-      }
-      if (cls.includes("sid") || cls.includes("student-id")) {
-        studentId = text || null;
-      }
-      if (cls.includes("section")) {
-        if (text) sections.push(text);
-      }
-    }
-
-    if (name || email) {
-      roster.push({ name, email, role, sections, studentId });
-    }
-  }
-
-  return roster;
+  return {
+    id: "",
+    score: score?.score ?? null,
+    maxScore: score?.maxScore ?? null,
+    submissionStatus,
+    statusRaw,
+    submitted: submittedFromStatus(submissionStatus),
+    submittedAt: valueContent(summary.querySelector("time[datetime], [class*='submitted']")),
+    late: lateFromText([lateText, statusRaw]),
+    lateness: lateText,
+    url: "",
+    questions: parseQuestionResults(root),
+  };
 }
 
-export function parseExtensions(html: string): GradescopeExtension[] {
-  const root = parseHTML(html);
-  const extensions: GradescopeExtension[] = [];
-
-  const rows = root.querySelectorAll("tbody tr, .extension-row");
-
-  for (const row of rows) {
-    const cells = row.querySelectorAll("td");
-    if (cells.length < 2) continue;
-
-    let studentName = "";
-    let studentEmail = "";
-    let dueDate = "";
-    let lateDueDate: string | null = null;
-
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      if (cls.includes("name") || (!studentName && !text.includes("@"))) {
-        if (!studentName && text.length > 1) studentName = text;
-      }
-      if (text.includes("@")) studentEmail = text;
-      if (cls.includes("due") || cls.includes("date")) {
-        if (!dueDate) dueDate = text;
-        else lateDueDate = text;
-      }
-    }
-
-    if (studentName || studentEmail) {
-      extensions.push({ studentName, studentEmail, dueDate, lateDueDate });
-    }
-  }
-
-  return extensions;
+function regradeStatusFromRaw(raw: string | null): NormalizedRegradeStatus {
+  if (!raw) return "unknown";
+  const value = raw.toLowerCase();
+  if (/pending|open|awaiting/.test(value)) return "pending";
+  if (/approved|accepted|granted/.test(value)) return "approved";
+  if (/denied|rejected|declined/.test(value)) return "denied";
+  if (/resolved|closed|complete|completed/.test(value)) return "resolved";
+  return "unknown";
 }
 
 export function parseRegradeRequests(html: string): GradescopeRegradeRequest[] {
   const root = parseHTML(html);
-  const requests: GradescopeRegradeRequest[] = [];
-
-  const rows = root.querySelectorAll(
-    ".regradeRequest, [class*='regrade'], tbody tr"
+  const candidates = root.querySelectorAll(
+    'tr, .regradeRequest, [class*="regradeRequest"], [data-regrade-request]'
   );
+  const requests: GradescopeRegradeRequest[] = [];
+  const seen = new Set<string>();
 
-  for (const row of rows) {
-    const link = row.querySelector('a[href*="regrade"]');
-    const href = link?.getAttribute("href") ?? "";
-    const idMatch = href.match(/regrade_requests\/(\d+)/) ?? href.match(/\/(\d+)$/);
-    const id = idMatch ? idMatch[1] : "";
+  for (const candidate of candidates) {
+    const rowText = textContent(candidate);
+    const link = candidate.querySelector('a[href*="regrade"]');
+    const href = link?.getAttribute("href") ?? null;
+    const id = href?.match(/regrade_requests\/(\d+)/)?.[1] ?? href?.match(/\/(\d+)$/)?.[1] ?? null;
+    if (!id && !/regrade/i.test(rowText)) continue;
 
-    const cells = row.querySelectorAll("td");
-    let studentName = "";
-    let questionName = "";
-    let status = "";
-    let explanation = "";
-    let response: string | null = null;
-    let createdAt = "";
+    const cells = candidate.querySelectorAll("td, th");
+    const headers = headerNames(candidate);
+    const statusCell = firstMatchingCell(cells, headers, /status/, /status/);
+    const questionCell = firstMatchingCell(cells, headers, /question/, /question/);
+    const explanationCell = firstMatchingCell(cells, headers, /explanation|reason/, /explanation|reason/);
+    const responseCell = firstMatchingCell(cells, headers, /response|reply/, /response|reply/);
+    const createdCell = firstMatchingCell(cells, headers, /created|requested|date|time/, /created|requested|date|time/);
+    const statusRaw = nullableText(valueContent(statusCell));
+    const questionName = nullableText(valueContent(questionCell));
+    const explanation = nullableText(valueContent(explanationCell));
+    const response = nullableText(valueContent(responseCell));
+    const createdAt = nullableText(valueContent(createdCell));
+    const key = id ?? `${questionName ?? ""}|${createdAt ?? ""}|${explanation ?? rowText}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      if (cls.includes("student") || cls.includes("name")) {
-        if (!studentName) studentName = text;
-      }
-      if (cls.includes("question")) questionName = text;
-      if (
-        cls.includes("status") ||
-        text.match(/^(pending|approved|denied|resolved)$/i)
-      ) {
-        status = text;
-      }
-      if (cls.includes("explanation") || cls.includes("reason")) {
-        explanation = text;
-      }
-      if (cls.includes("response") || cls.includes("reply")) {
-        response = text || null;
-      }
-      if (cls.includes("date") || cls.includes("time") || cls.includes("created")) {
-        createdAt = text;
-      }
-    }
-
-    if (id) {
-      requests.push({
-        id,
-        studentName,
-        questionName,
-        status,
-        explanation,
-        response,
-        createdAt,
-        url: href,
-      });
-    }
-  }
-
-  return requests;
-}
-
-export function parseCourseGrades(html: string): GradescopeGradeEntry[] {
-  const root = parseHTML(html);
-  const grades: GradescopeGradeEntry[] = [];
-
-  // Assignment rows on the course assignments page typically show scores
-  const rows = root.querySelectorAll("tbody tr, .assignment-row");
-
-  for (const row of rows) {
-    const link = row.querySelector('a[href*="/assignments/"]');
-    if (!link) continue;
-
-    const href = link.getAttribute("href") ?? "";
-    const idMatch = href.match(/\/assignments\/(\d+)/);
-    if (!idMatch) continue;
-
-    const name = textContent(link);
-    const cells = row.querySelectorAll("td");
-
-    let score: number | null = null;
-    let maxScore: number | null = null;
-    let status = "";
-
-    for (const cell of cells) {
-      const text = textContent(cell);
-      const cls = cell.getAttribute("class") ?? "";
-
-      const scoreMatch = text.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-      if (scoreMatch) {
-        score = parseNumber(scoreMatch[1]);
-        maxScore = parseNumber(scoreMatch[2]);
-      }
-
-      if (
-        cls.includes("status") ||
-        text.match(/graded|submitted|not submitted|missing/i)
-      ) {
-        if (!status) status = text;
-      }
-    }
-
-    grades.push({
-      assignmentName: name,
-      assignmentId: idMatch[1],
-      score,
-      maxScore,
-      status,
+    requests.push({
+      id,
+      questionName,
+      status: regradeStatusFromRaw(statusRaw),
+      statusRaw,
+      explanation,
+      response,
+      createdAt,
+      url: href,
     });
   }
 
-  return grades;
+  return requests;
 }

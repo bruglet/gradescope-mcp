@@ -1,137 +1,139 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GradescopeAPI } from "../gradescope-api.js";
-import { parseSubmissionList, parseSubmissionDetail } from "../html-parser.js";
+import { parseSubmissionDetail, parseSubmissionList } from "../html-parser.js";
+import { requireStudentCourse } from "../student-access.js";
+import type { GradescopeClient, GradescopeSubmission } from "../types.js";
+import {
+  getSubmissionOutputSchema,
+  listSubmissionsOutputSchema,
+} from "../tool-schemas.js";
+import { READ_ONLY_ANNOTATIONS, toolError, toolSuccess } from "../tool-utils.js";
 
-export function registerSubmissionTools(server: McpServer, api: GradescopeAPI): void {
-  server.tool(
+const numericId = (name: string) =>
+  z.string().regex(/^\d+$/, `${name} must be numeric`);
+
+const listInput = {
+  course_id: numericId("course_id").describe("The Gradescope student course ID"),
+  assignment_id: numericId("assignment_id").describe("The Gradescope assignment ID"),
+};
+
+const detailInput = {
+  ...listInput,
+  submission_id: numericId("submission_id").describe("The student submission ID"),
+};
+
+function submissionPath(courseId: string, assignmentId: string): string {
+  return `/courses/${courseId}/assignments/${assignmentId}/submissions`;
+}
+
+function submissionOutput(submission: GradescopeSubmission) {
+  return {
+    submission_id: submission.id,
+    submission_status: submission.submissionStatus,
+    status_raw: submission.statusRaw,
+    submitted: submission.submitted,
+    submitted_at: submission.submittedAt,
+    late: submission.late,
+    lateness: submission.lateness,
+    score: submission.score,
+    max_score: submission.maxScore,
+    url: submission.url,
+  };
+}
+
+export function registerSubmissionTools(
+  server: McpServer,
+  api: GradescopeClient
+): void {
+  server.registerTool(
     "list-submissions",
-    "List all submissions for a Gradescope assignment. Instructor/TA view shows all student submissions with scores. Student view shows your own submissions.",
     {
-      course_id: z.string().describe("The Gradescope course ID"),
-      assignment_id: z.string().describe("The Gradescope assignment ID"),
+      description:
+        "List the logged-in student's own submission attempts for an assignment, including timestamps, status, lateness, and scores.",
+      inputSchema: listInput,
+      outputSchema: listSubmissionsOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    async (args) => {
+    async ({ course_id, assignment_id }) => {
       try {
-        const html = await api.fetchPage(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions`
+        await requireStudentCourse(api, course_id);
+        const submissions = parseSubmissionList(
+          await api.fetchPage(submissionPath(course_id, assignment_id))
         );
-        const submissions = parseSubmissionList(html);
-        if (submissions.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "No submissions found. This could mean no one has submitted yet, you don't have permission to view submissions, or the page structure has changed.",
-              },
-            ],
-          };
-        }
-        return {
-          content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }],
-        };
+        return toolSuccess({
+          course_id,
+          assignment_id,
+          submissions: submissions.map(submissionOutput),
+        });
       } catch (error) {
-        return {
-          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
-          isError: true,
-        };
+        return toolError(error);
       }
     }
   );
 
-  server.tool(
+  server.registerTool(
     "get-submission",
-    "Get detailed information about a specific submission, including scores per question, applied rubric items, and grader comments.",
     {
-      course_id: z.string().describe("The Gradescope course ID"),
-      assignment_id: z.string().describe("The Gradescope assignment ID"),
-      submission_id: z.string().describe("The Gradescope submission ID"),
+      description:
+        "Get one of the logged-in student's submissions, including overall and per-question scores, rubric items, and grader comments.",
+      inputSchema: detailInput,
+      outputSchema: getSubmissionOutputSchema,
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    async (args) => {
+    async ({ course_id, assignment_id, submission_id }) => {
       try {
-        const html = await api.fetchPage(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions/${args.submission_id}`
+        await requireStudentCourse(api, course_id);
+        const summaries = parseSubmissionList(
+          await api.fetchPage(submissionPath(course_id, assignment_id))
         );
-        const detail = parseSubmissionDetail(html);
-
-        const result = {
-          id: args.submission_id,
-          assignmentId: args.assignment_id,
-          courseId: args.course_id,
-          url: `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions/${args.submission_id}`,
-          ...detail,
-        };
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  server.tool(
-    "submit-assignment",
-    "Upload and submit files to a Gradescope assignment. Provide absolute file paths to the files you want to submit.",
-    {
-      course_id: z.string().describe("The Gradescope course ID"),
-      assignment_id: z.string().describe("The Gradescope assignment ID"),
-      file_paths: z
-        .array(z.string())
-        .min(1)
-        .describe("Absolute paths to files to upload (e.g., PDF, code files, images)"),
-    },
-    async (args) => {
-      try {
-        // First, visit the submission page to get the form and fresh CSRF token
-        await api.fetchPage(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions/new`
-        );
-
-        const result = await api.postMultipart(
-          `/courses/${args.course_id}/assignments/${args.assignment_id}/submissions`,
-          args.file_paths
-        );
-
-        if (result.status === 302 || result.status === 301) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Submission successful! Redirected to: ${result.location ?? "submission page"}`,
-              },
-            ],
-          };
+        const summary = summaries.find((submission) => submission.id === submission_id);
+        if (!summary) {
+          throw new Error(
+            `Submission ${submission_id} was not found among the student's submissions for assignment ${assignment_id}`
+          );
         }
 
-        if (result.status >= 200 && result.status < 300) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Submission uploaded successfully.",
-              },
-            ],
-          };
-        }
+        const detail = parseSubmissionDetail(
+          await api.fetchPage(
+            `${submissionPath(course_id, assignment_id)}/${submission_id}`
+          )
+        );
+        const merged = {
+          ...summary,
+          score: detail.score ?? summary.score,
+          maxScore: detail.maxScore ?? summary.maxScore,
+          submissionStatus:
+            detail.submissionStatus === "unknown"
+              ? summary.submissionStatus
+              : detail.submissionStatus,
+          statusRaw: detail.statusRaw ?? summary.statusRaw,
+          submitted: detail.submitted ?? summary.submitted,
+          submittedAt: detail.submittedAt ?? summary.submittedAt,
+          late: detail.late ?? summary.late,
+          lateness: detail.lateness ?? summary.lateness,
+          questions: detail.questions,
+        };
 
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Submission returned status ${result.status}. The upload may or may not have succeeded. Check Gradescope to confirm.`,
-            },
-          ],
-        };
+        return toolSuccess({
+          course_id,
+          assignment_id,
+          submission: {
+            ...submissionOutput(merged),
+            questions: merged.questions.map((question) => ({
+              name: question.name,
+              score: question.score,
+              max_score: question.maxScore,
+              rubric_items: question.rubricItems.map((item) => ({
+                description: item.description,
+                points: item.points,
+                applied: item.applied,
+              })),
+              comments: question.comments,
+            })),
+          },
+        });
       } catch (error) {
-        return {
-          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
-          isError: true,
-        };
+        return toolError(error);
       }
     }
   );
