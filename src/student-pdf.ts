@@ -105,7 +105,11 @@ export function parseAssignmentPdfLink(
 
   if (!form) return null;
 
-  for (const anchor of form.querySelectorAll("a[href]")) {
+  // Gradescope currently renders the instructional paragraph containing the
+  // PDF link as a sibling of the upload form inside the same dialog, rather
+  // than as a descendant of the form itself.
+  const container = form.closest("dialog") ?? form;
+  for (const anchor of container.querySelectorAll("a[href]")) {
     const link = parseAllowedPdfLink(anchor, assignmentId);
     if (link) return link;
   }
