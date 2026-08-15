@@ -22,7 +22,7 @@ async function closeConnection({ client, server }) {
   await server.close();
 }
 
-test("registers the five production tools plus temporary diagnostics", async () => {
+test("registers the five production tools, PDF download, and temporary diagnostics", async () => {
   const connection = await connected({ fetchPage: async () => fixture("account.html") });
   try {
     const result = await connection.client.listTools();
@@ -31,6 +31,7 @@ test("registers the five production tools plus temporary diagnostics", async () 
       [
       "diagnose-course",
         "diagnose-submission",
+        "download-assignment-pdf",
         "get-submission",
         "list-assignments",
         "list-courses",
@@ -64,6 +65,84 @@ test("registers the five production tools plus temporary diagnostics", async () 
       submissionDiagnosticTool.inputSchema.properties.submission_id.pattern,
       "^\\d+$"
     );
+    const pdfTool = result.tools.find(
+      (tool) => tool.name === "download-assignment-pdf"
+    );
+    assert.equal(pdfTool.inputSchema.properties.course_id.pattern, "^\\d+$");
+    assert.equal(pdfTool.inputSchema.properties.assignment_id.pattern, "^\\d+$");
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("returns an embedded PDF resource without exposing its signed URL", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+    fetchAssignmentPdf: async (courseId, assignmentId) => {
+      assert.equal(courseId, "101");
+      assert.equal(assignmentId, "701");
+      return {
+        filename: "Reaction_Maze_.pdf",
+        mimeType: "application/pdf",
+        bytes: new TextEncoder().encode("%PDF-1.7\nfixture"),
+      };
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "download-assignment-pdf",
+      arguments: { course_id: "101", assignment_id: "701" },
+    });
+
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101",
+      assignment_id: "701",
+      available: true,
+      filename: "Reaction_Maze_.pdf",
+      mime_type: "application/pdf",
+      byte_length: 16,
+    });
+    const resource = result.content.find((content) => content.type === "resource");
+    assert.equal(resource.resource.mimeType, "application/pdf");
+    assert.equal(
+      new TextDecoder().decode(Buffer.from(resource.resource.blob, "base64")),
+      "%PDF-1.7\nfixture"
+    );
+    assert.match(resource.resource.uri, /^gradescope:\/\/courses\/101\/assignments\/701\//);
+    assert.equal(result.content.some((content) => content.text?.includes("X-Amz-")), false);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("reports when an assignment has no provided PDF", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+    fetchAssignmentPdf: async () => null,
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "download-assignment-pdf",
+      arguments: { course_id: "101", assignment_id: "702" },
+    });
+
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101",
+      assignment_id: "702",
+      available: false,
+      filename: null,
+      mime_type: null,
+      byte_length: null,
+    });
+    assert.equal(result.content.some((content) => content.type === "resource"), false);
   } finally {
     await closeConnection(connection);
   }
