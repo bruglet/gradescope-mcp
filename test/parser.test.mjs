@@ -160,6 +160,53 @@ test("parses multiple student submission attempts", () => {
   );
 });
 
+test("filters owned submission links from the student course dashboard", () => {
+  const submissions = parseSubmissionList(
+    fixture("course-submission-links.html"),
+    "101",
+    "201"
+  );
+
+  assert.deepEqual(
+    submissions.map((submission) => ({
+      id: submission.id,
+      submissionStatus: submission.submissionStatus,
+      submittedAt: submission.submittedAt,
+      late: submission.late,
+      lateness: submission.lateness,
+      score: submission.score,
+      maxScore: submission.maxScore,
+      url: submission.url,
+    })),
+    [
+      {
+        id: "301",
+        submissionStatus: "graded",
+        submittedAt: "2026-08-20T20:10:00-07:00",
+        late: false,
+        lateness: "On time",
+        score: 95,
+        maxScore: 100,
+        url: "/courses/101/assignments/201/submissions/301",
+      },
+      {
+        id: "302",
+        submissionStatus: "graded",
+        submittedAt: "2026-08-20T20:10:00-07:00",
+        late: false,
+        lateness: "On time",
+        score: 95,
+        maxScore: 100,
+        url: "/courses/101/assignments/201/submissions/302",
+      },
+    ]
+  );
+  assert.deepEqual(
+    parseSubmissionList(fixture("course-submission-links.html"), "101", "999"),
+    []
+  );
+});
+
 test("parses submission score, rubric items, comments, and timestamp", () => {
   const detail = parseSubmissionDetail(fixture("submission-detail.html"));
   assert.equal(detail.score, 95);

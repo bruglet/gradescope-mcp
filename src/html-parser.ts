@@ -477,15 +477,47 @@ function submissionFromContainer(
   };
 }
 
-export function parseSubmissionList(html: string): GradescopeSubmission[] {
+function submissionPathFromValue(
+  value: string | null | undefined,
+  courseId?: string,
+  assignmentId?: string
+): string | null {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value, "https://www.gradescope.com/");
+    if (url.origin !== "https://www.gradescope.com") return null;
+
+    const match = url.pathname.match(
+      /^\/courses\/(\d+)\/assignments\/(\d+)\/submissions\/(\d+)\/?$/
+    );
+    if (!match) return null;
+    if (courseId && match[1] !== courseId) return null;
+    if (assignmentId && match[2] !== assignmentId) return null;
+
+    return `/courses/${match[1]}/assignments/${match[2]}/submissions/${match[3]}`;
+  } catch {
+    return null;
+  }
+}
+
+export function parseSubmissionList(
+  html: string,
+  courseId?: string,
+  assignmentId?: string
+): GradescopeSubmission[] {
   const root = parseHTML(html);
   const submissions: GradescopeSubmission[] = [];
   const seenIds = new Set<string>();
 
   for (const link of root.querySelectorAll('a[href*="/submissions/"]')) {
-    const href = link.getAttribute("href") ?? "";
-    const id = href.match(/\/submissions\/(\d+)/)?.[1];
-    if (!id || seenIds.has(id)) continue;
+    const href = submissionPathFromValue(
+      link.getAttribute("href"),
+      courseId,
+      assignmentId
+    );
+    const id = href?.match(/\/submissions\/(\d+)$/)?.[1];
+    if (!href || !id || seenIds.has(id)) continue;
     seenIds.add(id);
     submissions.push(submissionFromContainer(submissionContainer(link), id, href));
   }

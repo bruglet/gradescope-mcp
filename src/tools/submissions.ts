@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { parseSubmissionDetail, parseSubmissionList } from "../html-parser.js";
+import { parseSubmissionDetail } from "../html-parser.js";
 import { requireStudentCourse } from "../student-access.js";
+import { listOwnedStudentSubmissions } from "../student-submissions.js";
 import type { GradescopeClient, GradescopeSubmission } from "../types.js";
 import {
   getSubmissionOutputSchema,
@@ -21,10 +22,6 @@ const detailInput = {
   ...listInput,
   submission_id: numericId("submission_id").describe("The student submission ID"),
 };
-
-function submissionPath(courseId: string, assignmentId: string): string {
-  return `/courses/${courseId}/assignments/${assignmentId}/submissions`;
-}
 
 function submissionOutput(submission: GradescopeSubmission) {
   return {
@@ -57,8 +54,10 @@ export function registerSubmissionTools(
     async ({ course_id, assignment_id }) => {
       try {
         await requireStudentCourse(api, course_id);
-        const submissions = parseSubmissionList(
-          await api.fetchPage(submissionPath(course_id, assignment_id))
+        const submissions = await listOwnedStudentSubmissions(
+          api,
+          course_id,
+          assignment_id
         );
         return toolSuccess({
           course_id,
@@ -83,8 +82,10 @@ export function registerSubmissionTools(
     async ({ course_id, assignment_id, submission_id }) => {
       try {
         await requireStudentCourse(api, course_id);
-        const summaries = parseSubmissionList(
-          await api.fetchPage(submissionPath(course_id, assignment_id))
+        const summaries = await listOwnedStudentSubmissions(
+          api,
+          course_id,
+          assignment_id
         );
         const summary = summaries.find((submission) => submission.id === submission_id);
         if (!summary) {
@@ -94,9 +95,7 @@ export function registerSubmissionTools(
         }
 
         const detail = parseSubmissionDetail(
-          await api.fetchPage(
-            `${submissionPath(course_id, assignment_id)}/${submission_id}`
-          )
+          await api.fetchPage(summary.url)
         );
         const merged = {
           ...summary,

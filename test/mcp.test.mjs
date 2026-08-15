@@ -174,8 +174,8 @@ test("returns structured submissions, submission details, and regrade requests",
   const api = {
     fetchPage: async (path) => {
       if (path === "/account") return fixture("account.html");
-      if (path === "/courses/101/assignments/201/submissions") {
-        return fixture("submissions.html");
+      if (path === "/courses/101") {
+        return fixture("course-submission-links.html");
       }
       if (path === "/courses/101/assignments/201/submissions/301") {
         return fixture("submission-detail.html");
@@ -205,6 +205,39 @@ test("returns structured submissions, submission details, and regrade requests",
       arguments: { course_id: "101", assignment_id: "201" },
     });
     assert.equal(regrades.structuredContent.regrade_requests.length, 3);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("uses student-owned dashboard links for regrade fallback without the submissions index", async () => {
+  const calls = [];
+  const api = {
+    fetchPage: async (path) => {
+      calls.push(path);
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("course-submission-links.html");
+      if (path === "/courses/101/assignments/201/regrade_requests") {
+        return "<main><p>No regrade requests were found.</p></main>";
+      }
+      if (/^\/courses\/101\/assignments\/201\/submissions\/\d+$/.test(path)) {
+        return fixture("regrades.html");
+      }
+      if (path === "/courses/101/assignments/201/submissions") {
+        throw new Error("the instructor-facing submissions index must not be requested");
+      }
+      throw new Error(`unexpected path ${path}`);
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const regrades = await connection.client.callTool({
+      name: "list-regrade-requests",
+      arguments: { course_id: "101", assignment_id: "201" },
+    });
+    assert.equal(regrades.structuredContent.regrade_requests.length, 3);
+    assert.ok(calls.includes("/courses/101"));
+    assert.ok(!calls.includes("/courses/101/assignments/201/submissions"));
   } finally {
     await closeConnection(connection);
   }

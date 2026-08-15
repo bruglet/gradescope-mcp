@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { parseRegradeRequests, parseSubmissionList } from "../html-parser.js";
+import { parseRegradeRequests } from "../html-parser.js";
 import { requireStudentCourse } from "../student-access.js";
+import { listOwnedStudentSubmissions } from "../student-submissions.js";
 import type { GradescopeClient, GradescopeRegradeRequest } from "../types.js";
 import { listRegradeRequestsOutputSchema } from "../tool-schemas.js";
 import { READ_ONLY_ANNOTATIONS, toolError, toolSuccess } from "../tool-utils.js";
@@ -50,11 +51,7 @@ async function requestsFromStudentSubmissions(
   courseId: string,
   assignmentId: string
 ): Promise<GradescopeRegradeRequest[]> {
-  const submissions = parseSubmissionList(
-    await api.fetchPage(
-      `/courses/${courseId}/assignments/${assignmentId}/submissions`
-    )
-  );
+  const submissions = await listOwnedStudentSubmissions(api, courseId, assignmentId);
   const requests: GradescopeRegradeRequest[] = [];
   for (const submission of submissions) {
     const detailHtml = await api.fetchPage(submission.url);
