@@ -11,9 +11,10 @@ This is a self-hosted fork of [TylerFlar/claude-gradescope-mcp](https://github.c
 The production surface contains the five student-data tools below plus one
 optional read-only tool for downloading an assignment-provided PDF:
 
-> Temporary diagnostics: this branch additionally exposes `diagnose-course` and
-> `diagnose-submission`. They are read-only and intentionally temporary; they
-> will be removed after the live parser repairs are complete.
+> Temporary diagnostics: this branch additionally exposes `diagnose-course`,
+> `diagnose-submission`, and `diagnose-assignment-pdf`. They are read-only and
+> intentionally temporary; they will be removed after the live parser repairs
+> are complete.
 > They are not part of the normal production surface.
 
 | Tool | Purpose |
