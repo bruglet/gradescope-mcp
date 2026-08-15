@@ -22,14 +22,15 @@ async function closeConnection({ client, server }) {
   await server.close();
 }
 
-test("registers the five production tools plus temporary course diagnostics", async () => {
+test("registers the five production tools plus temporary diagnostics", async () => {
   const connection = await connected({ fetchPage: async () => fixture("account.html") });
   try {
     const result = await connection.client.listTools();
     assert.deepEqual(
       result.tools.map((tool) => tool.name).sort(),
       [
-        "diagnose-course",
+      "diagnose-course",
+        "diagnose-submission",
         "get-submission",
         "list-assignments",
         "list-courses",
@@ -48,6 +49,21 @@ test("registers the five production tools plus temporary course diagnostics", as
     assert.equal(assignmentTool.inputSchema.properties.course_id.pattern, "^\\d+$");
     const diagnosticTool = result.tools.find((tool) => tool.name === "diagnose-course");
     assert.equal(diagnosticTool.inputSchema.properties.course_id.pattern, "^\\d+$");
+    const submissionDiagnosticTool = result.tools.find(
+      (tool) => tool.name === "diagnose-submission"
+    );
+    assert.equal(
+      submissionDiagnosticTool.inputSchema.properties.course_id.pattern,
+      "^\\d+$"
+    );
+    assert.equal(
+      submissionDiagnosticTool.inputSchema.properties.assignment_id.pattern,
+      "^\\d+$"
+    );
+    assert.equal(
+      submissionDiagnosticTool.inputSchema.properties.submission_id.pattern,
+      "^\\d+$"
+    );
   } finally {
     await closeConnection(connection);
   }
