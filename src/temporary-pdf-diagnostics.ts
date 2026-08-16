@@ -39,6 +39,16 @@ const signedParameterSchema = z.object(
   ) as Record<(typeof SIGNED_PARAMETERS)[number], z.ZodBoolean>
 );
 
+const urlShapeSchema = z.object({
+  protocol: z.string().nullable(),
+  hostname: z.string().nullable(),
+  pathname: z.string().nullable(),
+  query_present: z.boolean(),
+  expected_upload_host: z.boolean(),
+  expected_pdf_path: z.boolean(),
+  signed_parameters: signedParameterSchema,
+});
+
 const pdfAnchorSchema = z.object({
   scope: z.enum(["matching-dialog", "matching-form", "page"]),
   label: z.string().nullable(),
@@ -64,6 +74,16 @@ const buttonSchema = z.object({
   assignment_id: z.string().nullable(),
   label: z.string().nullable(),
   classes: z.array(z.string()),
+  data_attributes: z.array(
+    z.object({
+      name: z.string(),
+      present: z.boolean(),
+      length: z.number().int().nonnegative(),
+      contains_assignment_id: z.boolean(),
+      contains_pdf_marker: z.boolean(),
+      url: urlShapeSchema.nullable(),
+    })
+  ),
 });
 
 export const diagnoseAssignmentPdfOutputSchema = z.object({
@@ -87,6 +107,24 @@ export const diagnoseAssignmentPdfOutputSchema = z.object({
       inline_count: z.number().int().nonnegative(),
       pdf_marker_count: z.number().int().nonnegative(),
       submit_assignment_marker_count: z.number().int().nonnegative(),
+      script_details: z.object({
+        items: z.array(
+          z.object({
+            index: z.number().int().nonnegative(),
+            external: z.boolean(),
+            type: z.string().nullable(),
+            byte_length: z.number().int().nonnegative(),
+            contains_assignment_id: z.boolean(),
+            contains_pdf_marker: z.boolean(),
+            contains_pdf_upload_path: z.boolean(),
+            contains_signed_parameter_marker: z.boolean(),
+            contains_request_marker: z.boolean(),
+            same_origin_path_candidates: boundedStringListSchema,
+          })
+        ),
+        total_count: z.number().int().nonnegative(),
+        truncated: z.boolean(),
+      }),
     }),
   }),
   structure: z.object({
@@ -118,6 +156,8 @@ export const diagnoseAssignmentPdfOutputSchema = z.object({
     scoped_candidate_count: z.number().int().nonnegative(),
     accepted_link: z.boolean(),
     filename: z.string().nullable(),
+    template_data_attribute_present: z.boolean(),
+    template_data_attribute_candidate: z.boolean(),
     rejection_reasons: z.array(z.string()),
   }),
   warnings: z.array(z.string()),
@@ -279,18 +319,120 @@ function assignmentButtonId(element: HTMLElement): string | null {
   return null;
 }
 
+const inspectedDataAttributes = [
+  "data-template-url",
+  "data-post-url",
+  "data-images-url",
+  "data-assignment-id",
+  "data-assignment-title",
+  "data-submission-format",
+  "data-ready-for-submission",
+];
+
+type UrlShape = z.infer<typeof urlShapeSchema>;
+
+function inspectUrlShape(value: string | null | undefined): UrlShape | null {
+  if (!value || !/^(?:https?:\/\/|\/)/i.test(value)) return null;
+
+  const signedParameters = Object.fromEntries(
+    SIGNED_PARAMETERS.map((parameter) => [parameter, false])
+  ) as Record<(typeof SIGNED_PARAMETERS)[number], boolean>;
+
+  try {
+    const url = new URL(value, `${GRADESCOPE_ORIGIN}/`);
+    for (const parameter of SIGNED_PARAMETERS) {
+      signedParameters[parameter] = url.searchParams.has(parameter);
+    }
+    return {
+      protocol: url.protocol,
+      hostname: url.hostname || null,
+      pathname: url.pathname || null,
+      query_present: url.search.length > 0,
+      expected_upload_host: UPLOAD_HOST_PATTERN.test(url.hostname),
+      expected_pdf_path: PDF_PATH_PATTERN.test(url.pathname),
+      signed_parameters: signedParameters,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function inspectButtonDataAttributes(
+  button: HTMLElement,
+  assignmentId: string
+) {
+  return inspectedDataAttributes.map((name) => {
+    const value = button.getAttribute(name);
+    return {
+      name,
+      present: value !== null,
+      length: value?.length ?? 0,
+      contains_assignment_id: value?.includes(assignmentId) ?? false,
+      contains_pdf_marker: /pdf|template/i.test(value ?? ""),
+      url: inspectUrlShape(value),
+    };
+  });
+}
+
 function loginPageTitle(root: HTMLElement): string | null {
   return visibleText(root.querySelector("title"));
 }
 
-function scriptDiagnostics(root: HTMLElement) {
+function scriptPathCandidates(
+  scriptText: string,
+  courseId: string
+): string[] {
+  const normalized = scriptText.replace(/\\\//g, "/");
+  const paths: string[] = [];
+  const pathPattern = /["'`](\/[^"'`?#\s]{1,240})["'`]/g;
+
+  for (const match of normalized.matchAll(pathPattern)) {
+    try {
+      const url = new URL(match[1], `${GRADESCOPE_ORIGIN}/`);
+      if (
+        url.origin === GRADESCOPE_ORIGIN &&
+        (url.pathname.startsWith(`/courses/${courseId}`) ||
+          url.pathname.startsWith("/api/"))
+      ) {
+        paths.push(url.pathname);
+      }
+    } catch {
+      // Ignore strings that are not URL-like paths.
+    }
+  }
+
+  return Array.from(new Set(paths));
+}
+
+function scriptDiagnostics(
+  root: HTMLElement,
+  courseId: string,
+  assignmentId: string
+) {
   const scripts = root.querySelectorAll("script");
+  const details = scripts.map((script, index) => {
+    const text = script.textContent ?? "";
+    return {
+      index,
+      external: Boolean(script.getAttribute("src")),
+      type: safeIdentifier(script.getAttribute("type")),
+      byte_length: new TextEncoder().encode(text).byteLength,
+      contains_assignment_id: text.includes(assignmentId),
+      contains_pdf_marker: /pdf|template/i.test(text),
+      contains_pdf_upload_path: /uploads\\?\/pdf_attachment\\?\/file/i.test(text),
+      contains_signed_parameter_marker: /X-Amz-|Signature|Credential/i.test(text),
+      contains_request_marker: /\bfetch\b|XMLHttpRequest|\$\.ajax|\bajax\b/i.test(text),
+      same_origin_path_candidates: bounded(scriptPathCandidates(text, courseId)),
+    };
+  });
+
   return {
     total_count: scripts.length,
     external_count: scripts.filter((script) => Boolean(script.getAttribute("src"))).length,
     inline_count: scripts.filter((script) => !script.getAttribute("src")).length,
     pdf_marker_count: scripts.filter((script) => /pdf|template/i.test(script.textContent ?? "")).length,
     submit_assignment_marker_count: scripts.filter((script) => /submitAssignment|assignment-id/i.test(script.textContent ?? "")).length,
+    script_details: bounded(details),
   };
 }
 
@@ -384,7 +526,8 @@ function diagnosticWarnings(
   allPdfAnchors: HTMLElement[],
   scopedAnchors: PdfAnchorDiagnostic[],
   acceptedLink: boolean,
-  scriptInfo: ReturnType<typeof scriptDiagnostics>
+  scriptInfo: ReturnType<typeof scriptDiagnostics>,
+  templateDataAttributeCandidate: boolean
 ): string[] {
   const warnings: string[] = [];
   if (login.detected) {
@@ -400,6 +543,11 @@ function diagnosticWarnings(
   if (matchingForms.length === 0) {
     warnings.push(
       "submission-form-absent: no assignment-specific upload form was found in the fetched HTML"
+    );
+  }
+  if (templateDataAttributeCandidate) {
+    warnings.push(
+      "template-data-attribute-present: the assignment button contains a PDF-looking data-template-url value; the current parser only scans form/dialog anchors"
     );
   }
   if (matchingForms.length > 0 && matchingDialogs.length === 0) {
@@ -471,7 +619,20 @@ export function diagnoseAssignmentPdfPage(
       ? ("dialog" as const)
       : ("form" as const)
     : null;
-  const scriptInfo = scriptDiagnostics(root);
+  const scriptInfo = scriptDiagnostics(root, courseId, assignmentId);
+  const buttonDataAttributes = matchingButtons.flatMap((button) =>
+    inspectButtonDataAttributes(button, assignmentId)
+  );
+  const templateDataAttribute = buttonDataAttributes.find(
+    (attribute) => attribute.name === "data-template-url"
+  );
+  const templateDataAttributeCandidate = Boolean(
+    templateDataAttribute?.url?.expected_upload_host &&
+      templateDataAttribute.url.expected_pdf_path &&
+      SIGNED_PARAMETERS.every(
+        (parameter) => templateDataAttribute.url?.signed_parameters[parameter]
+      )
+  );
   const rejectionReasons = Array.from(
     new Set(scopedAnchors.flatMap((anchor) => anchor.rejection_reasons))
   );
@@ -503,6 +664,7 @@ export function diagnoseAssignmentPdfPage(
           assignment_id: assignmentButtonId(button),
           label: visibleText(button),
           classes: classNames(button),
+          data_attributes: inspectButtonDataAttributes(button, assignmentId),
         })).slice(0, MAX_DETAILS),
         truncated: matchingButtons.length > MAX_DETAILS,
       },
@@ -523,6 +685,10 @@ export function diagnoseAssignmentPdfPage(
       scoped_candidate_count: scopedAnchors.length,
       accepted_link: parsed !== null,
       filename: parsed?.filename ?? null,
+      template_data_attribute_present: Boolean(
+        templateDataAttribute?.present
+      ),
+      template_data_attribute_candidate: templateDataAttributeCandidate,
       rejection_reasons: rejectionReasons,
     },
     warnings: diagnosticWarnings(
@@ -533,7 +699,8 @@ export function diagnoseAssignmentPdfPage(
       allPdfAnchors,
       scopedAnchors,
       parsed !== null,
-      scriptInfo
+      scriptInfo,
+      templateDataAttributeCandidate
     ),
   };
 }

@@ -8,7 +8,12 @@
     <table id="assignments-student-table">
       <tr>
         <th>
-          <button class="js-submitAssignment" data-assignment-id="701">
+          <button
+            class="js-submitAssignment"
+            data-assignment-id="701"
+            data-template-url="https://production-gradescope-uploads.s3-us-west-2.amazonaws.com/uploads/pdf_attachment/file/123456/Reaction_Maze_.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&amp;X-Amz-Credential=fixture%2F20260815%2Fus-west-2%2Fs3%2Faws4_request&amp;X-Amz-Date=20260815T204847Z&amp;X-Amz-Expires=10800&amp;X-Amz-SignedHeaders=host&amp;X-Amz-Signature=fixture-signature"
+            data-post-url="/courses/101/assignments/701/submissions"
+          >
             Reaction Maze-Extra Credit
           </button>
         </th>
@@ -17,6 +22,7 @@
     </table>
     <script>
       const student = "student@example.edu";
+      const assignmentId = "701";
       const scriptValue = "script-value-must-not-appear";
       const templateMarker = "pdf template modal data";
     </script>

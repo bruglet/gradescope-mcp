@@ -51,13 +51,30 @@ test("identifies a likely JavaScript-rendered modal in raw server HTML", () => {
   assert.equal(result.structure.forms.matching_assignment_count, 0);
   assert.equal(result.structure.dialogs.matching_count, 0);
   assert.equal(result.parser.accepted_link, false);
+  assert.equal(result.parser.template_data_attribute_present, true);
+  assert.equal(result.parser.template_data_attribute_candidate, true);
+  assert.ok(
+    result.structure.assignment_buttons.items[0].data_attributes.some(
+      (attribute) =>
+        attribute.name === "data-template-url" &&
+        attribute.url?.expected_upload_host === true &&
+        attribute.url?.expected_pdf_path === true
+    )
+  );
+  assert.ok(
+    result.page.scripts.script_details.items.some(
+      (script) => script.contains_assignment_id === true
+    )
+  );
   assert.match(result.warnings.join("\n"), /browser-only-modal-possible/);
+  assert.match(result.warnings.join("\n"), /template-data-attribute-present/);
   assert.match(result.warnings.join("\n"), /script-generated-pdf-possible/);
 
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes("csrf-secret-value-must-not-appear"), false);
   assert.equal(serialized.includes("script-value-must-not-appear"), false);
   assert.equal(serialized.includes("student@example.edu"), false);
+  assert.equal(serialized.includes("fixture-signature"), false);
 });
 
 test("reports safety-check failures without returning query values", () => {
