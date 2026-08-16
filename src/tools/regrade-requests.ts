@@ -11,11 +11,15 @@ const inputSchema = {
   course_id: z
     .string()
     .regex(/^\d+$/, "course_id must be numeric")
-    .describe("The Gradescope student course ID"),
+    .describe(
+      "Numeric Gradescope course ID as a string; normally obtain it from list-courses."
+    ),
   assignment_id: z
     .string()
     .regex(/^\d+$/, "assignment_id must be numeric")
-    .describe("The Gradescope assignment ID"),
+    .describe(
+      "Numeric Gradescope assignment ID as a string; normally obtain it from list-assignments."
+    ),
 };
 
 function requestOutput(request: GradescopeRegradeRequest) {
@@ -68,7 +72,7 @@ export function registerRegradeTools(
     "list-regrade-requests",
     {
       description:
-        "List the logged-in student's regrade requests for an assignment, including status, explanation, response, and request time when available.",
+        "List regrade requests for an assignment, including question, status, explanation, response, request time, and URL when available. Use when the user asks whether a regrade was requested, resolved, or answered; obtain course_id and assignment_id from list-courses and list-assignments. An empty result means no request was found, and this tool cannot create or modify regrade requests.",
       inputSchema,
       outputSchema: listRegradeRequestsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,

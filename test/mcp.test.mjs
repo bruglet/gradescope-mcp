@@ -46,6 +46,27 @@ test("registers the five production tools, PDF download, and temporary diagnosti
       assert.ok(tool.outputSchema, `${tool.name} must publish an output schema`);
     }
 
+    const productionTools = result.tools.filter(
+      (tool) => !tool.name.startsWith("diagnose-")
+    );
+    for (const tool of productionTools) {
+      assert.match(tool.description, /\bUse\b/i, `${tool.name} must explain when to use it`);
+      assert.doesNotMatch(
+        tool.description,
+        /logged[- ]in (?:user|student)/i,
+        `${tool.name} must use model-facing language`
+      );
+
+      for (const [parameter, schema] of Object.entries(
+        tool.inputSchema.properties ?? {}
+      )) {
+        assert.ok(
+          schema.description,
+          `${tool.name}.${parameter} must explain its expected value`
+        );
+      }
+    }
+
     const assignmentTool = result.tools.find((tool) => tool.name === "list-assignments");
     assert.equal(assignmentTool.inputSchema.properties.course_id.pattern, "^\\d+$");
     const diagnosticTool = result.tools.find((tool) => tool.name === "diagnose-course");

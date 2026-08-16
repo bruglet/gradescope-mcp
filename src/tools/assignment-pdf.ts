@@ -9,11 +9,15 @@ const inputSchema = {
   course_id: z
     .string()
     .regex(/^\d+$/, "course_id must be numeric")
-    .describe("The Gradescope student course ID"),
+    .describe(
+      "Numeric Gradescope course ID as a string; normally obtain it from list-courses."
+    ),
   assignment_id: z
     .string()
     .regex(/^\d+$/, "assignment_id must be numeric")
-    .describe("The Gradescope assignment ID"),
+    .describe(
+      "Numeric Gradescope assignment ID as a string; normally obtain it from list-assignments."
+    ),
 };
 
 function metadata(
@@ -41,7 +45,7 @@ export function registerAssignmentPdfTool(
     "download-assignment-pdf",
     {
       description:
-        "Download the provided PDF for a student assignment when Gradescope makes one available. The result includes an embedded PDF resource; assignments without a provided PDF return available=false.",
+        "Retrieve the PDF supplied with an assignment, such as a worksheet or template, as an embedded resource with filename and size metadata. Use when the user asks to open, download, or check whether an assignment provides a PDF; this is the only Gradescope tool that determines file availability, and course_id and assignment_id normally come from list-courses and list-assignments. Do not use for submitted files or grading details; assignments without a provided PDF return available=false.",
       inputSchema,
       outputSchema: downloadAssignmentPdfOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,

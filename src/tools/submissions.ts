@@ -14,13 +14,19 @@ const numericId = (name: string) =>
   z.string().regex(/^\d+$/, `${name} must be numeric`);
 
 const listInput = {
-  course_id: numericId("course_id").describe("The Gradescope student course ID"),
-  assignment_id: numericId("assignment_id").describe("The Gradescope assignment ID"),
+  course_id: numericId("course_id").describe(
+    "Numeric Gradescope course ID as a string; normally obtain it from list-courses."
+  ),
+  assignment_id: numericId("assignment_id").describe(
+    "Numeric Gradescope assignment ID as a string; normally obtain it from list-assignments."
+  ),
 };
 
 const detailInput = {
   ...listInput,
-  submission_id: numericId("submission_id").describe("The student submission ID"),
+  submission_id: numericId("submission_id").describe(
+    "Numeric Gradescope submission ID as a string; normally obtain it from list-submissions."
+  ),
 };
 
 function submissionOutput(submission: GradescopeSubmission) {
@@ -46,7 +52,7 @@ export function registerSubmissionTools(
     "list-submissions",
     {
       description:
-        "List the logged-in student's own submission attempts for an assignment, including timestamps, status, lateness, and scores.",
+        "List submission attempts for an assignment, including submission IDs, timestamps, status, lateness, scores, and URLs. Use when the user asks about attempt history or when you need a submission_id for get-submission; obtain course_id and assignment_id from list-courses and list-assignments. This returns attempt summaries, not per-question scores, rubric items, or grader comments.",
       inputSchema: listInput,
       outputSchema: listSubmissionsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -74,7 +80,7 @@ export function registerSubmissionTools(
     "get-submission",
     {
       description:
-        "Get one of the logged-in student's submissions, including overall and per-question scores, rubric items, and grader comments.",
+        "Get one specific submission with its summary, per-question scores, rubric items, and grader comments. Use for detailed grading questions after list-submissions provides submission_id; do not use for assignment overviews or attempt history. Question, rubric, or comment arrays may be empty when Gradescope has not released or does not expose those details.",
       inputSchema: detailInput,
       outputSchema: getSubmissionOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,

@@ -12,7 +12,7 @@ export function registerCourseTools(
     "list-courses",
     {
       description:
-        "List the courses available to the logged-in student, including course names, IDs, terms, and URLs.",
+        "List Gradescope courses, including course IDs, names, terms, and URLs. Use when the user asks about their courses or before another Gradescope tool when you need a course_id. Only courses available in the student role are returned.",
       inputSchema: {},
       outputSchema: listCoursesOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
