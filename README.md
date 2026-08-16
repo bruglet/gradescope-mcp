@@ -11,11 +11,6 @@ This is a self-hosted fork of [TylerFlar/claude-gradescope-mcp](https://github.c
 The production surface contains the five student-data tools below plus one
 optional read-only tool for downloading an assignment-provided PDF:
 
-> Temporary diagnostics: this branch additionally exposes `diagnose-course`,
-> `diagnose-submission`. They are read-only and intentionally temporary; they
-> will be removed after the live parser repairs are complete.
-> They are not part of the normal production surface.
-
 | Tool | Purpose |
 |------|---------|
 | `list-courses` | Lists courses under the logged-in account's Student Courses section. |
@@ -110,4 +105,4 @@ The Quadlet deliberately publishes only to loopback. Add the public MCP hostname
 
 ## Development status
 
-The self-hosting refactor restores the upstream Node/Express shape while retaining only the student read-only core. Cloudflare Access JWT verification and container/Quadlet packaging are implemented for the self-hosted HTTP path. Tunnel deployment and live validation remain host/account-specific steps. The assignment and submission parsers have been live-validated against current student pages; temporary diagnostics remain until the final cleanup step.
+The self-hosting refactor restores the upstream Node/Express shape while retaining only the student read-only core. Cloudflare Access JWT verification and container/Quadlet packaging are implemented for the self-hosted HTTP path. Tunnel deployment and live validation remain host/account-specific steps. The assignment and submission parsers have been live-validated against current student pages, and the temporary diagnostics have been removed.

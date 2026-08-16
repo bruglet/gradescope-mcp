@@ -4,8 +4,6 @@ import { registerAssignmentTools } from "./tools/assignments.js";
 import { registerCourseTools } from "./tools/courses.js";
 import { registerRegradeTools } from "./tools/regrade-requests.js";
 import { registerSubmissionTools } from "./tools/submissions.js";
-import { registerCourseDiagnosticTool } from "./temporary-course-diagnostics.js";
-import { registerSubmissionDiagnosticTool } from "./temporary-submission-diagnostics.js";
 import type { GradescopeClient } from "./types.js";
 
 /**
@@ -27,8 +25,6 @@ export function createServer(api: GradescopeClient): McpServer {
   registerAssignmentPdfTool(server, api);
   registerSubmissionTools(server, api);
   registerRegradeTools(server, api);
-  registerCourseDiagnosticTool(server, api);
-  registerSubmissionDiagnosticTool(server, api);
 
   return server;
 }
