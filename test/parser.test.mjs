@@ -134,6 +134,26 @@ test("finds only the current assignment's fresh signed PDF link", () => {
   assert.equal(parseAssignmentPdfLink(fixture("assignment-pdf.html"), "101", "702"), null);
 });
 
+test("finds the fresh signed PDF link from the assignment button template attribute", () => {
+  const link = parseAssignmentPdfLink(
+    fixture("assignment-pdf-template-attribute.html"),
+    "101",
+    "701"
+  );
+  assert.deepEqual(link, {
+    url: "https://production-gradescope-uploads.s3-us-west-2.amazonaws.com/uploads/pdf_attachment/file/123456/Reaction_Maze_.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=fixture%2F20260815%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260815T204847Z&X-Amz-Expires=10800&X-Amz-SignedHeaders=host&X-Amz-Signature=fixture-signature",
+    filename: "Reaction_Maze_.pdf",
+  });
+  assert.equal(
+    parseAssignmentPdfLink(
+      fixture("assignment-pdf-template-attribute.html"),
+      "101",
+      "702"
+    ),
+    null
+  );
+});
+
 test("rejects non-Gradescope or unsigned PDF links", () => {
   const html = `
     <form action="/courses/101/assignments/701/submissions">

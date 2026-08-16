@@ -52,7 +52,7 @@ test("allows login POST but keeps authenticated Gradescope access GET-only and s
 test("fetches provided PDFs with an external GET and never sends Gradescope cookies", async () => {
   const originalFetch = globalThis.fetch;
   const fixture = readFileSync(
-    new URL("./fixtures/assignment-pdf.html", import.meta.url),
+    new URL("./fixtures/assignment-pdf-template-attribute.html", import.meta.url),
     "utf8"
   );
   const calls = [];

@@ -29,7 +29,6 @@ test("registers the five production tools, PDF download, and temporary diagnosti
     assert.deepEqual(
       result.tools.map((tool) => tool.name).sort(),
       [
-        "diagnose-assignment-pdf",
         "diagnose-course",
         "diagnose-submission",
         "download-assignment-pdf",
@@ -56,17 +55,6 @@ test("registers the five production tools, PDF download, and temporary diagnosti
     );
     assert.equal(
       submissionDiagnosticTool.inputSchema.properties.course_id.pattern,
-      "^\\d+$"
-    );
-    const pdfDiagnosticTool = result.tools.find(
-      (tool) => tool.name === "diagnose-assignment-pdf"
-    );
-    assert.equal(
-      pdfDiagnosticTool.inputSchema.properties.course_id.pattern,
-      "^\\d+$"
-    );
-    assert.equal(
-      pdfDiagnosticTool.inputSchema.properties.assignment_id.pattern,
       "^\\d+$"
     );
     assert.equal(
