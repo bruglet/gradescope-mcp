@@ -11,6 +11,7 @@ import {
   createAccessMiddleware,
   getAccessConfiguration,
   isLocalAuthBypassAllowed,
+  verifyAccessJwt,
 } from "../dist/access-auth.js";
 
 const env = {
@@ -151,6 +152,29 @@ test("accepts a valid Cloudflare Access application assertion", async () => {
     fixture.keySet
   );
   assert.equal(identity, true);
+});
+
+test("accepts a Cloudflare Access service-token assertion", async () => {
+  const token = await accessToken(
+    {
+      common_name: "service-token.access",
+      email: null,
+      name: null,
+    },
+    { subject: "" }
+  );
+  const identity = await verifyAccessJwt(
+    request("https://gradescope-mcp.example/mcp", {
+      "Cf-Access-Jwt-Assertion": token,
+    }),
+    env,
+    fixture.keySet
+  );
+  assert.deepEqual(identity, {
+    subject: "service-token.access",
+    email: null,
+    name: null,
+  });
 });
 
 test("rejects missing, forged, expired, and mismatched Access assertions", async () => {
