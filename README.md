@@ -40,7 +40,7 @@ For HTTP deployment, the service expects Cloudflare Access to protect the public
 - `CF_ACCESS_TEAM_DOMAIN` — the Access team domain, such as `your-team.cloudflareaccess.com`. An `https://` prefix is also accepted, but paths, ports, query strings, and non-HTTPS domains are rejected.
 - `CF_ACCESS_AUD` — the Access application audience (AUD) tag for this MCP application.
 
-The middleware validates the `Cf-Access-Jwt-Assertion` signature using the team JWKS endpoint and checks the RS256 algorithm, issuer, audience, expiration, and subject. Missing or invalid configuration and missing, forged, expired, or mismatched assertions all receive a generic `403 Forbidden` before an MCP server or Gradescope request is created. The middleware does not trust an email claim for authorization; restrict the allowed identity in the Cloudflare Access application policy.
+The middleware validates the `Cf-Access-Jwt-Assertion` signature using the team JWKS endpoint and checks the RS256 algorithm, issuer, audience, expiration, and identity (`sub` for users or `common_name` for service tokens). Missing or invalid configuration and missing, forged, expired, or mismatched assertions all receive a generic `403 Forbidden` before an MCP server or Gradescope request is created. The middleware does not trust an email claim for authorization; restrict the allowed identity in the Cloudflare Access application policy.
 
 `/healthz` remains public for container health probes. It does not expose account data. `MCP_ALLOWED_EMAIL` is not used by this project.
 

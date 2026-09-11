@@ -87,10 +87,16 @@ function remoteKeySetFor(configuration: AccessConfiguration): JWTVerifyGetKey {
 }
 
 function identityFromPayload(payload: JWTPayload): AccessIdentity | null {
-  if (typeof payload.sub !== "string" || payload.sub.length === 0) return null;
+  const subject =
+    typeof payload.sub === "string" && payload.sub.length > 0
+      ? payload.sub
+      : typeof payload.common_name === "string" && payload.common_name.length > 0
+        ? payload.common_name
+        : null;
+  if (!subject) return null;
 
   return {
-    subject: payload.sub,
+    subject,
     email: typeof payload.email === "string" ? payload.email : null,
     name: typeof payload.name === "string" ? payload.name : null,
   };
