@@ -18,6 +18,13 @@ export function createServer(api: GradescopeClient): McpServer {
   const server = new McpServer({
     name: "gradescope-mcp",
     version: "1.0.0",
+    icons: [
+      {
+        src: "https://raw.githubusercontent.com/bruglet/.github/main/assets/mcp/gradescope-mcp.png",
+        mimeType: "image/png",
+        sizes: ["256x256"],
+      },
+    ],
   });
 
   registerCourseTools(server, api);

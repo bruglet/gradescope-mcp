@@ -22,6 +22,21 @@ async function closeConnection({ client, server }) {
   await server.close();
 }
 
+test("publishes the server icon", async () => {
+  const connection = await connected({ fetchPage: async () => fixture("account.html") });
+  try {
+    assert.deepEqual(connection.client.getServerVersion()?.icons, [
+      {
+        src: "https://raw.githubusercontent.com/bruglet/.github/main/assets/mcp/gradescope-mcp.png",
+        mimeType: "image/png",
+        sizes: ["256x256"],
+      },
+    ]);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
 test("registers the six production read-only tools", async () => {
   const connection = await connected({ fetchPage: async () => fixture("account.html") });
   try {
