@@ -1,4 +1,8 @@
 import { parse as parseHTML } from "node-html-parser";
+import { parseAssignmentPdfLink } from "./student-pdf.js";
+import type { GradescopeProvidedPdf } from "./types.js";
+
+const maxProvidedPdfBytes = 25 * 1024 * 1024;
 
 export class GradescopeAPI {
   private readonly baseUrl = "https://www.gradescope.com";
@@ -197,6 +201,92 @@ export class GradescopeAPI {
     } finally {
       release();
     }
+  }
+
+  async fetchAssignmentPdf(
+    courseId: string,
+    assignmentId: string
+  ): Promise<GradescopeProvidedPdf | null> {
+    if (!/^\d+$/.test(courseId) || !/^\d+$/.test(assignmentId)) {
+      throw new Error("Course and assignment IDs must be numeric");
+    }
+
+    const html = await this.fetchPage(`/courses/${courseId}`);
+    const link = parseAssignmentPdfLink(html, courseId, assignmentId);
+    if (!link) return null;
+
+    // Gradescope stores the provided PDF behind a short-lived, signed S3 URL.
+    // Fetch it immediately, without sending the Gradescope cookie jar to the
+    // external upload host. The parser only accepts the known Gradescope PDF
+    // upload shape, so this method never becomes an arbitrary URL fetcher.
+    const response = await fetch(link.url, {
+      redirect: "manual",
+      headers: { Accept: "application/pdf" },
+    });
+
+    if (this.isRedirect(response)) {
+      throw new Error("Gradescope provided PDF returned an unexpected redirect");
+    }
+    if (!response.ok) {
+      throw new Error(`Gradescope provided PDF failed (${response.status})`);
+    }
+
+    const contentLength = Number.parseInt(
+      response.headers.get("content-length") ?? "",
+      10
+    );
+    if (Number.isFinite(contentLength) && contentLength > maxProvidedPdfBytes) {
+      throw new Error("Gradescope provided PDF exceeds the 25 MiB safety limit");
+    }
+
+    const bytes = await this.readPdfBytes(response);
+    const signature = new TextDecoder().decode(bytes.subarray(0, 5));
+    if (signature !== "%PDF-") {
+      throw new Error("Gradescope provided file was not a PDF");
+    }
+
+    return {
+      filename: link.filename,
+      mimeType: "application/pdf",
+      bytes,
+    };
+  }
+
+  private async readPdfBytes(response: Response): Promise<Uint8Array> {
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > maxProvidedPdfBytes) {
+        throw new Error("Gradescope provided PDF exceeds the 25 MiB safety limit");
+      }
+      return bytes;
+    }
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = new Uint8Array(value);
+        total += chunk.byteLength;
+        if (total > maxProvidedPdfBytes) {
+          await reader.cancel();
+          throw new Error("Gradescope provided PDF exceeds the 25 MiB safety limit");
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
   }
 
   private async fetchPageWithRedirects(

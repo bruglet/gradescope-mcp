@@ -107,3 +107,12 @@ export const listRegradeRequestsOutputSchema = z.object({
   assignment_id: z.string(),
   regrade_requests: z.array(regradeRequestSchema),
 });
+
+export const downloadAssignmentPdfOutputSchema = z.object({
+  course_id: z.string(),
+  assignment_id: z.string(),
+  available: z.boolean(),
+  filename: z.string().nullable(),
+  mime_type: z.literal("application/pdf").nullable(),
+  byte_length: z.number().int().nonnegative().nullable(),
+});

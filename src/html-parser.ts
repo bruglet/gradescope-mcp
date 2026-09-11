@@ -1,4 +1,4 @@
-import { parse as parseHTML, type HTMLElement } from "node-html-parser";
+import { parse as parseHTML, type HTMLElement, type Node } from "node-html-parser";
 import type {
   GradescopeAssignment,
   GradescopeCourse,
@@ -79,6 +79,126 @@ function firstMatchingCell(
   return cellByHeader(cells, headers, headerMatcher) ?? cellByClass(cells, classMatcher);
 }
 
+function assignmentPathFromValue(
+  value: string | null | undefined,
+  courseId: string | undefined
+): string | null {
+  if (!value || !courseId) return null;
+
+  try {
+    const url = new URL(value, "https://www.gradescope.com/");
+    if (url.origin !== "https://www.gradescope.com") return null;
+
+    const match = url.pathname.match(
+      new RegExp(`^/courses/${courseId}/assignments/(\\d+)/?$`)
+    );
+    return match ? `/courses/${courseId}/assignments/${match[1]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function rowAssignmentPath(
+  row: HTMLElement,
+  courseId: string | undefined
+): string | null {
+  if (!courseId) return null;
+
+  const elements = [row, ...row.querySelectorAll("*")];
+  for (const element of elements) {
+    for (const attribute of ["href", "data-url", "data-href", "action"]) {
+      const path = assignmentPathFromValue(
+        element.getAttribute(attribute),
+        courseId
+      );
+      if (path) return path;
+    }
+  }
+  return null;
+}
+
+function rowAssignmentId(row: HTMLElement): string | null {
+  const candidates: Array<{ id: string; priority: number }> = [];
+  const elements = [row, ...row.querySelectorAll("*")];
+
+  for (const element of elements) {
+    for (const attribute of [
+      "data-assignment-id",
+      "data-assignment_id",
+      "data-assignment",
+    ]) {
+      const value = element.getAttribute(attribute)?.trim() ?? "";
+      if (/^\d+$/.test(value)) candidates.push({ id: value, priority: 0 });
+    }
+
+    const elementId = element.getAttribute("id")?.trim() ?? "";
+    const assignmentId = elementId.match(/^assignment[-_](\d+)$/i)?.[1];
+    if (assignmentId) candidates.push({ id: assignmentId, priority: 1 });
+
+    const dataId = element.getAttribute("data-id")?.trim() ?? "";
+    if (/^\d+$/.test(dataId)) candidates.push({ id: dataId, priority: 2 });
+  }
+
+  if (candidates.length === 0) return null;
+
+  const bestPriority = Math.min(...candidates.map(({ priority }) => priority));
+  const bestIds = new Set(
+    candidates
+      .filter(({ priority }) => priority === bestPriority)
+      .map(({ id }) => id)
+  );
+  return bestIds.size === 1 ? [...bestIds][0] : null;
+}
+
+function textBeforeDescendant(root: HTMLElement, target: HTMLElement): string | null {
+  let text = "";
+
+  function visit(node: Node): boolean {
+    for (const child of node.childNodes) {
+      if (child === target) return true;
+      if (child.childNodes.length > 0) {
+        if (visit(child)) return true;
+      } else {
+        text += child.textContent;
+      }
+    }
+    return false;
+  }
+
+  return visit(root) ? text : null;
+}
+
+function labeledDateContent(
+  element: HTMLElement | null,
+  labelPattern: RegExp
+): string | null {
+  if (!element) return null;
+
+  const times = element.querySelectorAll("time[datetime]");
+  for (const time of times) {
+    const timeText = textContent(time);
+    const timeLabel = time.getAttribute("aria-label") ?? "";
+    if (labelPattern.test(timeText) || labelPattern.test(timeLabel)) {
+      const displayedDate =
+        timeText.match(
+          new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
+        )?.[1] ?? timeText;
+      return nullableText(time.getAttribute("datetime") ?? displayedDate);
+    }
+
+    const textBefore = textBeforeDescendant(element, time);
+    if (textBefore && labelPattern.test(textBefore)) {
+      return nullableText(time.getAttribute("datetime") ?? textContent(time));
+    }
+  }
+
+  const text = textContent(element);
+  const match = text.match(
+    new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
+  );
+  return nullableText(match?.[1] ?? null);
+}
+
 function statusFromRaw(raw: string | null): NormalizedSubmissionStatus {
   if (!raw) return "unknown";
   const value = raw.toLowerCase();
@@ -92,6 +212,17 @@ function submittedFromStatus(status: NormalizedSubmissionStatus): boolean | null
   if (status === "submitted" || status === "graded") return true;
   if (status === "unsubmitted") return false;
   return null;
+}
+
+function statusWithScore(
+  status: NormalizedSubmissionStatus,
+  score: { score: number; maxScore: number } | null
+): NormalizedSubmissionStatus {
+  // Gradescope sometimes replaces the textual status with the released score
+  // (for example, "86.0 / 100.0"). A complete score pair is safe evidence
+  // that the work was graded, while the original display text remains in
+  // statusRaw for callers that need it.
+  return status === "unknown" && score ? "graded" : status;
 }
 
 function lateFromText(values: Array<string | null>): boolean | null {
@@ -197,7 +328,7 @@ export function parseDashboard(html: string): GradescopeCourse[] {
 }
 
 function assignmentType(row: HTMLElement, href: string): string {
-  const typeElement = row.querySelector(".assignment-type, [class*='type'], .badge");
+  const typeElement = row.querySelector(".assignment-type, .badge, [data-assignment-type]");
   const type = nullableText(textContent(typeElement));
   if (type) return type.toLowerCase();
   if (href.includes("programming")) return "programming";
@@ -205,28 +336,43 @@ function assignmentType(row: HTMLElement, href: string): string {
   return "unknown";
 }
 
-function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
+function assignmentFromRow(
+  row: HTMLElement,
+  courseId?: string
+): GradescopeAssignment | null {
   const link = row.querySelector('a[href*="/assignments/"]');
-  const href = link?.getAttribute("href") ?? "";
-  const id = href.match(/\/assignments\/(\d+)/)?.[1];
+  const linkedHref = link?.getAttribute("href") ?? "";
+  const linkedId = linkedHref.match(/\/assignments\/(\d+)/)?.[1];
+  const rowPath = rowAssignmentPath(row, courseId);
+  const id = linkedId ?? rowPath?.match(/\/assignments\/(\d+)/)?.[1] ?? rowAssignmentId(row);
   if (!id) return null;
+
+  const href = linkedHref || rowPath || (courseId ? `/courses/${courseId}/assignments/${id}` : "");
+  if (!href) return null;
 
   const cells = row.querySelectorAll("td, th");
   const headers = headerNames(row);
   const rowText = textContent(row);
 
-  const lateDueCell = firstMatchingCell(
-    cells,
-    headers,
-    /late due|late deadline|late submission deadline/,
-    /late.*due|late.*deadline|late.*date/
-  );
-  const dueCell = firstMatchingCell(
-    cells,
-    headers,
-    /^(?!.*late).*(due|deadline)/,
-    /due|deadline|date/
-  );
+  const lateDueCell =
+    firstMatchingCell(
+      cells,
+      headers,
+      /late due|late deadline|late submission deadline/,
+      /late.*due|late.*deadline|late.*date/
+    ) ??
+    cells.find((cell) =>
+      /\blate\s+(?:due\s+date|deadline)\b/i.test(textContent(cell))
+    ) ??
+    null;
+  const dueCell =
+    cellByHeader(cells, headers, /^(?:due|due date|deadline|deadline date)$/) ??
+    firstMatchingCell(
+      cells,
+      headers,
+      /^(?!.*late).*(due|deadline)/,
+      /due|deadline|date/
+    );
   const statusCell = firstMatchingCell(cells, headers, /(^| )status($| )/, /status|submission/);
   const scoreCell = firstMatchingCell(cells, headers, /score|grade|points/, /score|grade|points/);
   const submittedAtCell = firstMatchingCell(
@@ -243,18 +389,23 @@ function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
   );
 
   const statusRaw = nullableText(valueContent(statusCell));
-  const status = statusFromRaw(statusRaw);
   const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
   const score = scoreText ? parseScore(scoreText) : null;
+  const status = statusWithScore(statusFromRaw(statusRaw), score);
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
+  const lateDueDate =
+    labeledDateContent(lateDueCell, /\blate\s+(?:due\s+date|deadline)\b/i) ??
+    valueContent(lateDueCell);
+  const nameCell =
+    cellByHeader(cells, headers, /^(?:name|assignment)$/) ?? cells[0] ?? null;
 
   return {
     id,
-    name: textContent(link),
+    name: nullableText(textContent(link)) ?? textContent(nameCell),
     type: assignmentType(row, href),
     dueDate: valueContent(dueCell),
-    lateDueDate: valueContent(lateDueCell),
+    lateDueDate,
     released: !row.querySelector(".unreleased, .draft") && !/\bunreleased\b/i.test(rowText),
     submissionStatus: status,
     statusRaw,
@@ -268,13 +419,16 @@ function assignmentFromRow(row: HTMLElement): GradescopeAssignment | null {
   };
 }
 
-export function parseAssignmentList(html: string): GradescopeAssignment[] {
+export function parseAssignmentList(
+  html: string,
+  courseId?: string
+): GradescopeAssignment[] {
   const root = parseHTML(html);
   const assignments: GradescopeAssignment[] = [];
   const seenIds = new Set<string>();
 
   for (const row of root.querySelectorAll("tr, .assignment-row")) {
-    const assignment = assignmentFromRow(row);
+    const assignment = assignmentFromRow(row, courseId);
     if (!assignment || seenIds.has(assignment.id)) continue;
     seenIds.add(assignment.id);
     assignments.push(assignment);
@@ -311,9 +465,9 @@ function submissionFromContainer(
   const lateCell = firstMatchingCell(cells, headers, /late|lateness/, /late|lateness/);
 
   const statusRaw = nullableText(valueContent(statusCell));
-  const status = statusFromRaw(statusRaw);
   const scoreText = valueContent(scoreCell) ?? cells.map(textContent).find((text) => parseScore(text));
   const score = scoreText ? parseScore(scoreText) : null;
+  const status = statusWithScore(statusFromRaw(statusRaw), score);
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
   const submittedAt =
@@ -334,15 +488,47 @@ function submissionFromContainer(
   };
 }
 
-export function parseSubmissionList(html: string): GradescopeSubmission[] {
+function submissionPathFromValue(
+  value: string | null | undefined,
+  courseId?: string,
+  assignmentId?: string
+): string | null {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value, "https://www.gradescope.com/");
+    if (url.origin !== "https://www.gradescope.com") return null;
+
+    const match = url.pathname.match(
+      /^\/courses\/(\d+)\/assignments\/(\d+)\/submissions\/(\d+)\/?$/
+    );
+    if (!match) return null;
+    if (courseId && match[1] !== courseId) return null;
+    if (assignmentId && match[2] !== assignmentId) return null;
+
+    return `/courses/${match[1]}/assignments/${match[2]}/submissions/${match[3]}`;
+  } catch {
+    return null;
+  }
+}
+
+export function parseSubmissionList(
+  html: string,
+  courseId?: string,
+  assignmentId?: string
+): GradescopeSubmission[] {
   const root = parseHTML(html);
   const submissions: GradescopeSubmission[] = [];
   const seenIds = new Set<string>();
 
   for (const link of root.querySelectorAll('a[href*="/submissions/"]')) {
-    const href = link.getAttribute("href") ?? "";
-    const id = href.match(/\/submissions\/(\d+)/)?.[1];
-    if (!id || seenIds.has(id)) continue;
+    const href = submissionPathFromValue(
+      link.getAttribute("href"),
+      courseId,
+      assignmentId
+    );
+    const id = href?.match(/\/submissions\/(\d+)$/)?.[1];
+    if (!href || !id || seenIds.has(id)) continue;
     seenIds.add(id);
     submissions.push(submissionFromContainer(submissionContainer(link), id, href));
   }
@@ -350,7 +536,9 @@ export function parseSubmissionList(html: string): GradescopeSubmission[] {
 }
 
 function questionSections(root: HTMLElement): HTMLElement[] {
-  const primary = root.querySelectorAll(".question, [data-question-id], .rubric-question");
+  const primary = root.querySelectorAll(
+    ".question, [data-question-id], .rubric-question, .question-group, [class*='question-group']"
+  );
   return primary.length > 0 ? primary : root.querySelectorAll("[class*='question-']");
 }
 
@@ -364,12 +552,21 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
 
   for (const section of questionSections(root)) {
     const name = nullableText(
-      textContent(section.querySelector(".question-title, .name, h3, h4")) || textContent(section)
+      textContent(
+        section.querySelector(
+          ".question-title, .submissionOutline--sectionHeading, .submissionOutlineQuestion--sectionHeading, .name, h2, h3, h4"
+        )
+      ) || textContent(section)
     );
     if (!name) continue;
 
-    const scoreElement = section.querySelector("[class*='score'], .points");
-    const score = parseScore(textContent(scoreElement));
+    const score = [
+      section.querySelector(".submissionOutlineQuestion--weightAndScore"),
+      section.querySelector("[class*='weightAndScore']"),
+      section.querySelector("[class*='score'], .points"),
+    ]
+      .map((element) => parseScore(textContent(element)))
+      .find((value): value is { score: number; maxScore: number } => value !== null) ?? null;
     const key = `${name}|${score?.score ?? ""}|${score?.maxScore ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -409,6 +606,356 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
   return questions;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordValue(record: JsonRecord, keys: string[]): unknown {
+  for (const key of keys) {
+    if (key in record) return record[key];
+  }
+  return null;
+}
+
+function scalarText(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  return nullableText(String(value));
+}
+
+function scalarNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) return null;
+  const number = Number.parseFloat(trimmed);
+  return Number.isFinite(number) ? number : null;
+}
+
+function numericIdentifier(value: unknown): string | null {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return String(value);
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return value.trim();
+  }
+  return null;
+}
+
+function recordNumber(record: JsonRecord, keys: string[]): number | null {
+  for (const key of keys) {
+    const number = scalarNumber(record[key]);
+    if (number !== null) return number;
+  }
+  return null;
+}
+
+function questionIdFromRecord(
+  record: JsonRecord,
+  includeRecordId: boolean
+): string | null {
+  const direct = numericIdentifier(
+    recordValue(record, ["question_id", "questionId", "questionID"])
+  );
+  if (direct) return direct;
+
+  const question = record.question;
+  if (isJsonRecord(question)) {
+    const nested = questionIdFromRecord(question, true);
+    if (nested) return nested;
+  } else {
+    const nested = numericIdentifier(question);
+    if (nested) return nested;
+  }
+
+  return includeRecordId ? numericIdentifier(record.id) : null;
+}
+
+function questionNameFromRecord(record: JsonRecord): string | null {
+  for (const key of [
+    "name",
+    "title",
+    "question_name",
+    "questionName",
+    "display_name",
+    "displayName",
+    "label",
+  ]) {
+    const value = scalarText(record[key]);
+    if (value && !/^\(no title\)$/i.test(value)) return value;
+  }
+
+  const numberedTitle = scalarText(record.numbered_title);
+  if (numberedTitle) {
+    return /^question\b/i.test(numberedTitle)
+      ? numberedTitle
+      : `Question ${numberedTitle}`;
+  }
+
+  if (isJsonRecord(record.question)) {
+    return questionNameFromRecord(record.question);
+  }
+  return null;
+}
+
+const maxScoreKeys = [
+  "max_score",
+  "maxScore",
+  "points_possible",
+  "pointsPossible",
+  "max_points",
+  "maxPoints",
+  "total_points",
+  "totalPoints",
+  "weight",
+  "points",
+];
+
+const explicitMaxScoreKeys = maxScoreKeys.filter((key) => key !== "points");
+
+function questionMaxScore(record: JsonRecord): number | null {
+  return recordNumber(record, maxScoreKeys);
+}
+
+function questionScore(record: JsonRecord): {
+  score: number | null;
+  maxScore: number | null;
+} {
+  const scoreValue =
+    recordValue(record, [
+      "score",
+      "points_awarded",
+      "pointsAwarded",
+      "earned_score",
+      "earnedScore",
+    ]) ?? record.points;
+  const scoreText = scalarText(scoreValue);
+  const pair = scoreText ? parseScore(scoreText) : null;
+  if (pair) return pair;
+
+  return {
+    score: scalarNumber(scoreValue),
+    maxScore: recordNumber(record, explicitMaxScoreKeys),
+  };
+}
+
+interface QuestionMetadata {
+  name: string | null;
+  maxScore: number | null;
+}
+
+function mergeQuestionMetadata(
+  metadata: Map<string, QuestionMetadata>,
+  id: string,
+  next: QuestionMetadata
+): void {
+  const previous = metadata.get(id);
+  metadata.set(id, {
+    name: previous?.name ?? next.name,
+    maxScore: previous?.maxScore ?? next.maxScore,
+  });
+}
+
+function collectQuestionMetadata(
+  value: unknown,
+  metadata: Map<string, QuestionMetadata>,
+  inheritedId: string | null = null,
+  depth = 0
+): void {
+  if (depth > 8) return;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectQuestionMetadata(item, metadata, inheritedId, depth + 1);
+    }
+    return;
+  }
+  if (!isJsonRecord(value)) return;
+
+  const id = questionIdFromRecord(value, true) ?? inheritedId;
+  const name = questionNameFromRecord(value);
+  const maxScore = questionMaxScore(value);
+  if (id && (name !== null || maxScore !== null)) {
+    mergeQuestionMetadata(metadata, id, { name, maxScore });
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (!Array.isArray(child) && !isJsonRecord(child)) continue;
+    collectQuestionMetadata(
+      child,
+      metadata,
+      numericIdentifier(key) ?? id,
+      depth + 1
+    );
+  }
+}
+
+function objectEntries(value: unknown): Array<{ value: JsonRecord; key: string | null }> {
+  if (Array.isArray(value)) {
+    return value
+      .filter(isJsonRecord)
+      .map((item) => ({ value: item, key: null }));
+  }
+  if (!isJsonRecord(value)) return [];
+  return Object.entries(value)
+    .filter(([, item]) => isJsonRecord(item))
+    .map(([key, item]) => ({ value: item as JsonRecord, key: numericIdentifier(key) }));
+}
+
+function parseViewerProps(root: HTMLElement): JsonRecord | null {
+  const viewer = root.querySelector(
+    'div[data-react-class="AssignmentSubmissionViewer"][data-react-props]'
+  );
+  const raw = viewer?.getAttribute("data-react-props");
+  if (!raw) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isJsonRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseViewerQuestions(
+  props: JsonRecord
+): GradescopeQuestionResult[] {
+  const metadata = new Map<string, QuestionMetadata>();
+  collectQuestionMetadata(props.questions, metadata);
+  collectQuestionMetadata(props.outline, metadata);
+
+  const inorderIds = Array.isArray(props.inorder_leaf_question_ids)
+    ? props.inorder_leaf_question_ids
+        .map(numericIdentifier)
+        .filter((id): id is string => id !== null)
+    : [];
+  const order = new Map(inorderIds.map((id, index) => [id, index]));
+  const entries = objectEntries(props.question_submissions).map((entry, index) => ({
+    ...entry,
+    index,
+    id: questionIdFromRecord(entry.value, false) ?? entry.key,
+  }));
+
+  entries.sort((left, right) => {
+    const leftOrder = left.id ? order.get(left.id) : undefined;
+    const rightOrder = right.id ? order.get(right.id) : undefined;
+    if (leftOrder === undefined && rightOrder === undefined) return left.index - right.index;
+    if (leftOrder === undefined) return 1;
+    if (rightOrder === undefined) return -1;
+    return leftOrder - rightOrder;
+  });
+
+  const questions: GradescopeQuestionResult[] = [];
+  const seen = new Set<string>();
+  for (const [index, entry] of entries.entries()) {
+    const meta = entry.id ? metadata.get(entry.id) : undefined;
+    const score = questionScore(entry.value);
+    const maxScore = score.maxScore ?? meta?.maxScore ?? null;
+    const name =
+      questionNameFromRecord(entry.value) ??
+      meta?.name ??
+      (score.score !== null || maxScore !== null ? `Question ${index + 1}` : null);
+    if (!name) continue;
+
+    const key = entry.id ?? `${name}|${score.score ?? ""}|${maxScore ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    questions.push({
+      name,
+      score: score.score,
+      maxScore,
+      rubricItems: [],
+      comments: [],
+    });
+  }
+  return questions;
+}
+
+function parseViewerSubmission(root: HTMLElement): {
+  score: number | null;
+  maxScore: number | null;
+  submissionStatus: NormalizedSubmissionStatus;
+  statusRaw: string | null;
+  submitted: boolean | null;
+  submittedAt: string | null;
+  late: boolean | null;
+  lateness: string | null;
+  questions: GradescopeQuestionResult[];
+} | null {
+  const props = parseViewerProps(root);
+  if (!props) return null;
+
+  const assignmentSubmission = isJsonRecord(props.assignment_submission)
+    ? props.assignment_submission
+    : {};
+  const assignment = isJsonRecord(props.assignment) ? props.assignment : {};
+  const scoreValue = recordValue(assignmentSubmission, ["score", "points_awarded", "pointsAwarded"]);
+  const scorePair = scalarText(scoreValue) ? parseScore(scalarText(scoreValue) ?? "") : null;
+  const score = scorePair?.score ?? scalarNumber(scoreValue);
+  const maxScore =
+    scorePair?.maxScore ??
+    recordNumber(assignmentSubmission, maxScoreKeys) ??
+    recordNumber(assignment, maxScoreKeys);
+  const questions = parseViewerQuestions(props);
+  const totalQuestionMax =
+    questions.length > 0 && questions.every((question) => question.maxScore !== null)
+      ? questions.reduce((total, question) => total + (question.maxScore ?? 0), 0)
+      : null;
+  const resolvedMaxScore = maxScore ??
+    (totalQuestionMax !== null ? totalQuestionMax : null);
+  const statusValue = recordValue(assignmentSubmission, [
+    "submission_status",
+    "submissionStatus",
+    "status",
+  ]);
+  const statusRawCandidate = scalarText(statusValue);
+  const rawStatus = statusFromRaw(statusRawCandidate);
+  const status = statusWithScore(
+    rawStatus,
+    score !== null && resolvedMaxScore !== null
+      ? { score, maxScore: resolvedMaxScore }
+      : null
+  );
+  const explicitSubmitted = recordValue(assignmentSubmission, [
+    "submitted",
+    "is_submitted",
+    "isSubmitted",
+  ]);
+  const submitted =
+    typeof explicitSubmitted === "boolean"
+      ? explicitSubmitted
+      : submittedFromStatus(status);
+  const submittedAt = scalarText(
+    recordValue(assignmentSubmission, [
+      "submitted_at",
+      "submittedAt",
+      "created_at",
+      "createdAt",
+    ])
+  );
+  const explicitLate = recordValue(assignmentSubmission, ["late", "is_late", "isLate"]);
+  const lateness = scalarText(
+    recordValue(assignmentSubmission, ["lateness", "late_by", "lateBy", "late_text"])
+  );
+  const late =
+    typeof explicitLate === "boolean"
+      ? explicitLate
+      : lateFromText([lateness, statusRawCandidate]);
+
+  return {
+    score,
+    maxScore: resolvedMaxScore,
+    submissionStatus: status,
+    statusRaw: rawStatus === "unknown" ? null : statusRawCandidate,
+    submitted,
+    submittedAt,
+    late,
+    lateness,
+    questions,
+  };
+}
+
 export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail {
   const root = parseHTML(html);
   const summary = root.querySelector(
@@ -421,23 +968,42 @@ export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail 
   const statusElement = summary.querySelector(
     ".submissionStatus, [data-status], [class*='status']"
   );
-  const statusRaw = nullableText(valueContent(statusElement));
-  const submissionStatus = statusFromRaw(statusRaw);
+  const viewerSubmission = parseViewerSubmission(root);
+  const htmlStatusRaw = nullableText(valueContent(statusElement));
+  const statusRaw = htmlStatusRaw ?? viewerSubmission?.statusRaw ?? null;
+  const status =
+    htmlStatusRaw !== null
+      ? statusFromRaw(htmlStatusRaw)
+      : viewerSubmission?.submissionStatus ?? "unknown";
+  const htmlScore = score;
+  const resolvedScore = htmlScore?.score ?? viewerSubmission?.score ?? null;
+  const resolvedMaxScore = htmlScore?.maxScore ?? viewerSubmission?.maxScore ?? null;
+  const submissionStatus = statusWithScore(
+    status,
+    resolvedScore !== null && resolvedMaxScore !== null
+      ? { score: resolvedScore, maxScore: resolvedMaxScore }
+      : null
+  );
   const lateElement = summary.querySelector("[class*='late'], [class*='lateness']");
-  const lateText = valueContent(lateElement) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const lateText =
+    valueContent(lateElement) ??
+    viewerSubmission?.lateness ??
+    (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
+  const htmlSubmittedAt = valueContent(summary.querySelector("time[datetime], [class*='submitted']"));
+  const htmlQuestions = parseQuestionResults(root);
 
   return {
     id: "",
-    score: score?.score ?? null,
-    maxScore: score?.maxScore ?? null,
+    score: resolvedScore,
+    maxScore: resolvedMaxScore,
     submissionStatus,
     statusRaw,
-    submitted: submittedFromStatus(submissionStatus),
-    submittedAt: valueContent(summary.querySelector("time[datetime], [class*='submitted']")),
-    late: lateFromText([lateText, statusRaw]),
+    submitted: viewerSubmission?.submitted ?? submittedFromStatus(submissionStatus),
+    submittedAt: htmlSubmittedAt ?? viewerSubmission?.submittedAt ?? null,
+    late: viewerSubmission?.late ?? lateFromText([lateText, statusRaw]),
     lateness: lateText,
     url: "",
-    questions: parseQuestionResults(root),
+    questions: htmlQuestions.length > 0 ? htmlQuestions : viewerSubmission?.questions ?? [],
   };
 }
 

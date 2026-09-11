@@ -8,7 +8,8 @@ This is a self-hosted fork of [TylerFlar/claude-gradescope-mcp](https://github.c
 
 ## Current tools
 
-The server exposes exactly these five MCP tools:
+The production surface contains the five student-data tools below plus one
+optional read-only tool for downloading an assignment-provided PDF:
 
 | Tool | Purpose |
 |------|---------|
@@ -17,12 +18,13 @@ The server exposes exactly these five MCP tools:
 | `list-submissions` | Lists the student's submission attempts for an assignment. |
 | `get-submission` | Returns one owned submission with summary fields, question scores, rubric items, and grader comments. |
 | `list-regrade-requests` | Lists the student's regrade requests and their status, explanation, response, and request time when available. |
+| `download-assignment-pdf` | Fetches the current provided PDF for an assignment when one exists and returns it as an embedded PDF resource. |
 
-All tools publish structured output and also include the same JSON as text content. Course, assignment, and submission IDs are validated as numeric strings. Course-scoped tools verify that the course appears under Student Courses before requesting course data; instructor, TA, unknown, and absent courses fail closed.
+The data tools publish structured output and also include the same JSON as text content. The PDF tool returns structured availability metadata plus the embedded PDF resource; it does not return the expiring signed URL. Course, assignment, and submission IDs are validated as numeric strings. Course-scoped tools verify that the course appears under Student Courses before requesting course data; instructor, TA, unknown, and absent courses fail closed.
 
 ## Read-only guarantee
 
-The MCP surface contains no submission, regrade-creation, extension, grading, roster, grade-export, debug-page, or other mutation tool. The Gradescope client exposes authenticated page GETs only. Its only outbound non-GET request is the required form POST to `/login`; same-origin URLs and redirects are enforced before cookies are attached, and redirects are bounded.
+The MCP surface contains no submission, regrade-creation, extension, grading, roster, grade-export, debug-page, or other mutation tool. The Gradescope client exposes authenticated page GETs plus a narrowly restricted GET for the current Gradescope-provided PDF. Its only outbound non-GET request is the required form POST to `/login`; same-origin URLs and redirects are enforced before Gradescope cookies are attached, and redirects are bounded. PDF downloads use the fresh signed upload URL from the student course page without sending Gradescope cookies, accept only the known Gradescope PDF-upload path, and are capped at 25 MiB.
 
 Authentication cookies are held in memory and are never written to the repository or disk. Never commit credentials, cookies, CSRF tokens, raw account pages, or student data.
 
@@ -103,4 +105,4 @@ The Quadlet deliberately publishes only to loopback. Add the public MCP hostname
 
 ## Development status
 
-The self-hosting refactor restores the upstream Node/Express shape while retaining only the student read-only core. Cloudflare Access JWT verification and container/Quadlet packaging are implemented for the self-hosted HTTP path. Tunnel deployment and live validation remain host/account-specific steps. The assignment parser still requires live validation and repair against the current student course-page markup.
+The self-hosting refactor restores the upstream Node/Express shape while retaining only the student read-only core. Cloudflare Access JWT verification and container/Quadlet packaging are implemented for the self-hosted HTTP path. Tunnel deployment and live validation remain host/account-specific steps. The assignment and submission parsers have been live-validated against current student pages, and the temporary diagnostics have been removed.

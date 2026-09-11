@@ -22,13 +22,14 @@ async function closeConnection({ client, server }) {
   await server.close();
 }
 
-test("registers exactly the five production tools", async () => {
+test("registers the six production read-only tools", async () => {
   const connection = await connected({ fetchPage: async () => fixture("account.html") });
   try {
     const result = await connection.client.listTools();
     assert.deepEqual(
       result.tools.map((tool) => tool.name).sort(),
       [
+        "download-assignment-pdf",
         "get-submission",
         "list-assignments",
         "list-courses",
@@ -43,8 +44,104 @@ test("registers exactly the five production tools", async () => {
       assert.ok(tool.outputSchema, `${tool.name} must publish an output schema`);
     }
 
+    for (const tool of result.tools) {
+      assert.match(tool.description, /\bUse\b/i, `${tool.name} must explain when to use it`);
+      assert.doesNotMatch(
+        tool.description,
+        /logged[- ]in (?:user|student)/i,
+        `${tool.name} must use model-facing language`
+      );
+
+      for (const [parameter, schema] of Object.entries(
+        tool.inputSchema.properties ?? {}
+      )) {
+        assert.ok(
+          schema.description,
+          `${tool.name}.${parameter} must explain its expected value`
+        );
+      }
+    }
+
     const assignmentTool = result.tools.find((tool) => tool.name === "list-assignments");
     assert.equal(assignmentTool.inputSchema.properties.course_id.pattern, "^\\d+$");
+    const pdfTool = result.tools.find(
+      (tool) => tool.name === "download-assignment-pdf"
+    );
+    assert.equal(pdfTool.inputSchema.properties.course_id.pattern, "^\\d+$");
+    assert.equal(pdfTool.inputSchema.properties.assignment_id.pattern, "^\\d+$");
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("returns an embedded PDF resource without exposing its signed URL", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+    fetchAssignmentPdf: async (courseId, assignmentId) => {
+      assert.equal(courseId, "101");
+      assert.equal(assignmentId, "701");
+      return {
+        filename: "Reaction_Maze_.pdf",
+        mimeType: "application/pdf",
+        bytes: new TextEncoder().encode("%PDF-1.7\nfixture"),
+      };
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "download-assignment-pdf",
+      arguments: { course_id: "101", assignment_id: "701" },
+    });
+
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101",
+      assignment_id: "701",
+      available: true,
+      filename: "Reaction_Maze_.pdf",
+      mime_type: "application/pdf",
+      byte_length: 16,
+    });
+    const resource = result.content.find((content) => content.type === "resource");
+    assert.equal(resource.resource.mimeType, "application/pdf");
+    assert.equal(
+      new TextDecoder().decode(Buffer.from(resource.resource.blob, "base64")),
+      "%PDF-1.7\nfixture"
+    );
+    assert.match(resource.resource.uri, /^gradescope:\/\/courses\/101\/assignments\/701\//);
+    assert.equal(result.content.some((content) => content.text?.includes("X-Amz-")), false);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("reports when an assignment has no provided PDF", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+    fetchAssignmentPdf: async () => null,
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "download-assignment-pdf",
+      arguments: { course_id: "101", assignment_id: "702" },
+    });
+
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101",
+      assignment_id: "702",
+      available: false,
+      filename: null,
+      mime_type: null,
+      byte_length: null,
+    });
+    assert.equal(result.content.some((content) => content.type === "resource"), false);
   } finally {
     await closeConnection(connection);
   }
@@ -82,6 +179,70 @@ test("lists only student courses and uses the student dashboard for assignments"
   }
 });
 
+test("list-assignments parses unlinked student dashboard rows", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") {
+        return fixture("assignments-unlinked-table.html");
+      }
+      throw new Error(`unexpected path ${path}`);
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "list-assignments",
+      arguments: { course_id: "101" },
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.assignments[0].assignment_type, "unknown");
+    assert.deepEqual(
+      result.structuredContent.assignments.map((assignment) => ({
+        assignment_id: assignment.assignment_id,
+        assignment_name: assignment.assignment_name,
+        due_date: assignment.due_date,
+        late_due_date: assignment.late_due_date,
+        submission_status: assignment.submission_status,
+        submitted: assignment.submitted,
+        url: assignment.url,
+      })),
+      [
+        {
+          assignment_id: "701",
+          assignment_name: "Homework 1",
+          due_date: "2026-09-02T10:00:00-07:00",
+          late_due_date: "2026-09-04T10:00:00-07:00",
+          submission_status: "unsubmitted",
+          submitted: false,
+          url: "/courses/101/assignments/701",
+        },
+        {
+          assignment_id: "702",
+          assignment_name: "Lab 2",
+          due_date: "Sep 8 at 11:59PM",
+          late_due_date: null,
+          submission_status: "submitted",
+          submitted: true,
+          url: "/courses/101/assignments/702",
+        },
+        {
+          assignment_id: "703",
+          assignment_name: "Worksheet 3",
+          due_date: "Sep 10 at 11:59PM",
+          late_due_date: null,
+          submission_status: "unsubmitted",
+          submitted: false,
+          url: "/courses/101/assignments/703",
+        },
+      ]
+    );
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
 test("rejects instructor courses before accessing course data", async () => {
   const calls = [];
   const connection = await connected({
@@ -107,8 +268,8 @@ test("returns structured submissions, submission details, and regrade requests",
   const api = {
     fetchPage: async (path) => {
       if (path === "/account") return fixture("account.html");
-      if (path === "/courses/101/assignments/201/submissions") {
-        return fixture("submissions.html");
+      if (path === "/courses/101") {
+        return fixture("course-submission-links.html");
       }
       if (path === "/courses/101/assignments/201/submissions/301") {
         return fixture("submission-detail.html");
@@ -138,6 +299,39 @@ test("returns structured submissions, submission details, and regrade requests",
       arguments: { course_id: "101", assignment_id: "201" },
     });
     assert.equal(regrades.structuredContent.regrade_requests.length, 3);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("uses student-owned dashboard links for regrade fallback without the submissions index", async () => {
+  const calls = [];
+  const api = {
+    fetchPage: async (path) => {
+      calls.push(path);
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("course-submission-links.html");
+      if (path === "/courses/101/assignments/201/regrade_requests") {
+        return "<main><p>No regrade requests were found.</p></main>";
+      }
+      if (/^\/courses\/101\/assignments\/201\/submissions\/\d+$/.test(path)) {
+        return fixture("regrades.html");
+      }
+      if (path === "/courses/101/assignments/201/submissions") {
+        throw new Error("the instructor-facing submissions index must not be requested");
+      }
+      throw new Error(`unexpected path ${path}`);
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const regrades = await connection.client.callTool({
+      name: "list-regrade-requests",
+      arguments: { course_id: "101", assignment_id: "201" },
+    });
+    assert.equal(regrades.structuredContent.regrade_requests.length, 3);
+    assert.ok(calls.includes("/courses/101"));
+    assert.ok(!calls.includes("/courses/101/assignments/201/submissions"));
   } finally {
     await closeConnection(connection);
   }

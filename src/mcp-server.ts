@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerAssignmentPdfTool } from "./tools/assignment-pdf.js";
 import { registerAssignmentTools } from "./tools/assignments.js";
 import { registerCourseTools } from "./tools/courses.js";
 import { registerRegradeTools } from "./tools/regrade-requests.js";
@@ -21,6 +22,7 @@ export function createServer(api: GradescopeClient): McpServer {
 
   registerCourseTools(server, api);
   registerAssignmentTools(server, api);
+  registerAssignmentPdfTool(server, api);
   registerSubmissionTools(server, api);
   registerRegradeTools(server, api);
 

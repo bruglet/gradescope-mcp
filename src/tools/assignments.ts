@@ -10,7 +10,9 @@ const courseInput = {
   course_id: z
     .string()
     .regex(/^\d+$/, "course_id must be numeric")
-    .describe("The Gradescope student course ID"),
+    .describe(
+      "Numeric Gradescope course ID as a string; normally obtain it from list-courses."
+    ),
 };
 
 export function registerAssignmentTools(
@@ -21,7 +23,7 @@ export function registerAssignmentTools(
     "list-assignments",
     {
       description:
-        "List assignments from the student-facing course dashboard, including due dates, submission state, lateness, and scores when Gradescope exposes them.",
+        "List assignments for a course, including IDs, due and late-due dates, submission status and time, lateness, scores, release state, and URLs. Use for questions about deadlines, missing or submitted work, or course grades, and to obtain an assignment_id for assignment-specific tools; use list-courses first if course_id is unknown. Use list-submissions for attempt history and get-submission for question or rubric details; null or unknown fields mean Gradescope did not expose the value reliably.",
       inputSchema: courseInput,
       outputSchema: listAssignmentsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -30,7 +32,8 @@ export function registerAssignmentTools(
       try {
         await requireStudentCourse(api, course_id);
         const assignments = parseAssignmentList(
-          await api.fetchPage(`/courses/${course_id}`)
+          await api.fetchPage(`/courses/${course_id}`),
+          course_id
         );
 
         return toolSuccess({

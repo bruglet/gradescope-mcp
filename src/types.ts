@@ -85,6 +85,16 @@ export interface GradescopeRegradeRequest {
   url: string | null;
 }
 
+export interface GradescopeProvidedPdf {
+  filename: string;
+  mimeType: "application/pdf";
+  bytes: Uint8Array;
+}
+
 export interface GradescopeClient {
   fetchPage(urlPath: string): Promise<string>;
+  fetchAssignmentPdf(
+    courseId: string,
+    assignmentId: string
+  ): Promise<GradescopeProvidedPdf | null>;
 }
