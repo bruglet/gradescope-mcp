@@ -37,7 +37,7 @@ test("publishes the server icon", async () => {
   }
 });
 
-test("registers the six production read-only tools", async () => {
+test("registers the seven production read-only tools", async () => {
   const connection = await connected({ fetchPage: async () => fixture("account.html") });
   try {
     const result = await connection.client.listTools();
@@ -45,6 +45,7 @@ test("registers the six production read-only tools", async () => {
       result.tools.map((tool) => tool.name).sort(),
       [
         "download-assignment-pdf",
+        "download-submission-pdf",
         "get-submission",
         "list-assignments",
         "list-courses",
@@ -258,6 +259,37 @@ test("list-assignments parses unlinked student dashboard rows", async () => {
   }
 });
 
+test("publishes schema-validated deadline status values", async () => {
+  const api = {
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("assignment-deadlines-mcp.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+  };
+  const connection = await connected(api);
+  try {
+    const result = await connection.client.callTool({
+      name: "list-assignments",
+      arguments: { course_id: "101" },
+    });
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(
+      result.structuredContent.assignments.map(({ assignment_id, deadline_status }) => ({
+        assignment_id,
+        deadline_status,
+      })),
+      [
+        { assignment_id: "811", deadline_status: "accepting_late" },
+        { assignment_id: "812", deadline_status: "closed" },
+      ]
+    );
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
 test("rejects instructor courses before accessing course data", async () => {
   const calls = [];
   const connection = await connected({
@@ -349,5 +381,88 @@ test("uses student-owned dashboard links for regrade fallback without the submis
     assert.ok(!calls.includes("/courses/101/assignments/201/submissions"));
   } finally {
     await closeConnection(connection);
+  }
+});
+
+test("returns an owned submission's original PDF with metadata and no signed URL", async () => {
+  const calls = [];
+  const connection = await connected({
+    fetchPage: async (path) => {
+      calls.push(path);
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("course-submission-links.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+    fetchSubmissionPdf: async (...ids) => {
+      assert.deepEqual(ids, ["101", "201", "301"]);
+      return { filename: "Submitted_Work.pdf", mimeType: "application/pdf", bytes: Buffer.from("%PDF-1.7\noriginal") };
+    },
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: "download-submission-pdf",
+      arguments: { course_id: "101", assignment_id: "201", submission_id: "301" },
+    });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101", assignment_id: "201", submission_id: "301", available: true,
+      filename: "Submitted_Work.pdf", mime_type: "application/pdf", byte_length: 17,
+    });
+    const resource = result.content.find((item) => item.type === "resource").resource;
+    assert.equal(resource.uri, "gradescope://courses/101/assignments/201/submissions/301/original.pdf");
+    assert.equal(resource.mimeType, "application/pdf");
+    assert.equal(Buffer.from(resource.blob, "base64").toString(), "%PDF-1.7\noriginal");
+    assert.doesNotMatch(JSON.stringify(result), /X-Amz-|amazonaws/);
+    assert.deepEqual(calls, ["/account", "/courses/101"]);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("reports an owned submission without an original PDF as unavailable", async () => {
+  const connection = await connected({
+    fetchPage: async (path) => fixture(path === "/account" ? "account.html" : "course-submission-links.html"),
+    fetchSubmissionPdf: async () => null,
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: "download-submission-pdf",
+      arguments: { course_id: "101", assignment_id: "201", submission_id: "301" },
+    });
+    assert.deepEqual(result.structuredContent, {
+      course_id: "101", assignment_id: "201", submission_id: "301", available: false,
+      filename: null, mime_type: null, byte_length: null,
+    });
+    assert.equal(result.content.some((item) => item.type === "resource"), false);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
+test("rejects non-student courses, unowned submissions, and invalid IDs before downloading", async () => {
+  for (const [args, expectedCalls, error] of [
+    [{ course_id: "999", assignment_id: "201", submission_id: "301" }, ["/account"], /Student Courses/],
+    [{ course_id: "101", assignment_id: "201", submission_id: "303" }, ["/account", "/courses/101"], /not found/],
+    [{ course_id: "101", assignment_id: "201", submission_id: "999" }, ["/account", "/courses/101"], /not found/],
+    [{ course_id: "101", assignment_id: "201", submission_id: "../301" }, [], /numeric/],
+  ]) {
+    const calls = [];
+    const connection = await connected({
+      fetchPage: async (path) => {
+        calls.push(path);
+        if (path === "/account") return fixture("account.html");
+        if (path === "/courses/101") return fixture("course-submission-links.html");
+        throw new Error(`unexpected path ${path}`);
+      },
+      fetchSubmissionPdf: async () => { throw new Error("download must not be reached"); },
+    });
+    try {
+      const result = await connection.client.callTool({ name: "download-submission-pdf", arguments: args });
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, error);
+      assert.deepEqual(calls, expectedCalls);
+    } finally {
+      await closeConnection(connection);
+    }
   }
 });

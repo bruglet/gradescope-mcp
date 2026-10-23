@@ -8,23 +8,26 @@ This is a self-hosted fork of [TylerFlar/claude-gradescope-mcp](https://github.c
 
 ## Current tools
 
-The production surface contains the five student-data tools below plus one
-optional read-only tool for downloading an assignment-provided PDF:
+The production surface contains the five student-data tools below plus two
+read-only tools for downloading provided and submitted PDFs:
 
 | Tool | Purpose |
 |------|---------|
 | `list-courses` | Lists courses under the logged-in account's Student Courses section. |
-| `list-assignments` | Lists a student's assignments with due dates, late due dates, status, timestamps, lateness, scores, release state, and URLs when available. |
+| `list-assignments` | Lists a student's assignments with regular and late deadlines, current deadline phase, submission status, timestamps, lateness, scores, release state, and URLs when available. |
 | `list-submissions` | Lists the student's submission attempts for an assignment. |
 | `get-submission` | Returns one owned submission with summary fields, question scores, rubric items, and grader comments. |
 | `list-regrade-requests` | Lists the student's regrade requests and their status, explanation, response, and request time when available. |
 | `download-assignment-pdf` | Fetches the current provided PDF for an assignment when one exists and returns it as an embedded PDF resource. |
+| `download-submission-pdf` | Fetches the original PDF for an owned submission as an embedded PDF resource, without grading annotations. |
 
-The data tools publish structured output and also include the same JSON as text content. The PDF tool returns structured availability metadata plus the embedded PDF resource; it does not return the expiring signed URL. Course, assignment, and submission IDs are validated as numeric strings. Course-scoped tools verify that the course appears under Student Courses before requesting course data; instructor, TA, unknown, and absent courses fail closed.
+The data tools publish structured output and also include the same JSON as text content. The PDF tools return structured availability metadata plus the embedded PDF resource; they do not return expiring signed URLs. Course, assignment, and submission IDs are validated as numeric strings. Course-scoped tools verify that the course appears under Student Courses before requesting course data; instructor, TA, unknown, and absent courses fail closed.
+
+`list-assignments` reports `deadline_status` as `before_due`, `accepting_late`, `closed`, or `unknown`. It uses explicit Gradescope deadline labels when present, then complete due timestamps. It returns `unknown` when the page does not provide enough information.
 
 ## Read-only guarantee
 
-The MCP surface contains no submission, regrade-creation, extension, grading, roster, grade-export, debug-page, or other mutation tool. The Gradescope client exposes authenticated page GETs plus a narrowly restricted GET for the current Gradescope-provided PDF. Its only outbound non-GET request is the required form POST to `/login`; same-origin URLs and redirects are enforced before Gradescope cookies are attached, and redirects are bounded. PDF downloads use the fresh signed upload URL from the student course page without sending Gradescope cookies, accept only the known Gradescope PDF-upload path, and are capped at 25 MiB.
+The MCP surface contains no submission, regrade-creation, extension, grading, roster, grade-export, debug-page, or other mutation tool. The Gradescope client exposes authenticated page GETs plus narrowly restricted GETs for provided and original submitted PDFs. Its only outbound non-GET request is the required form POST to `/login`; same-origin URLs and redirects are enforced before Gradescope cookies are attached, and redirects are bounded. PDF downloads use fresh signed upload URLs from the student course page or an owned submission viewer without sending Gradescope cookies, accept only the known Gradescope PDF-upload path, and are capped at 25 MiB. Submission downloads use only the viewer’s original-file path and never the graded PDF export. They require a submission ID returned by the student dashboard; submissions without an original PDF return `available=false`.
 
 Authentication cookies are held in memory and are never written to the repository or disk. Never commit credentials, cookies, CSRF tokens, raw account pages, or student data.
 

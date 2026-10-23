@@ -1,5 +1,6 @@
 import { parse as parseHTML, type HTMLElement, type Node } from "node-html-parser";
 import type {
+  DeadlineStatus,
   GradescopeAssignment,
   GradescopeCourse,
   GradescopeQuestionResult,
@@ -168,35 +169,95 @@ function textBeforeDescendant(root: HTMLElement, target: HTMLElement): string | 
   return visit(root) ? text : null;
 }
 
-function labeledDateContent(
-  element: HTMLElement | null,
-  labelPattern: RegExp
+type DeadlineKind = "regular" | "late" | "release";
+
+function deadlineLabelKind(text: string): DeadlineKind | null {
+  const labels = [...text.matchAll(
+    /\b(?:released?(?:\s+date)?|late\s+(?:due(?:\s+date)?|deadline)|due(?:\s+date)?|deadline)\b/gi
+  )];
+  const last = labels.at(-1)?.[0].toLowerCase();
+  if (!last) return null;
+  if (last.startsWith("release")) return "release";
+  return last.startsWith("late") ? "late" : "regular";
+}
+
+function deadlineDateContent(
+  cell: HTMLElement | null,
+  kind: "regular" | "late",
+  allowUnlabeled: boolean
 ): string | null {
-  if (!element) return null;
-
-  const times = element.querySelectorAll("time[datetime]");
+  if (!cell) return null;
+  const times = cell.querySelectorAll("time");
   for (const time of times) {
-    const timeText = textContent(time);
-    const timeLabel = time.getAttribute("aria-label") ?? "";
-    if (labelPattern.test(timeText) || labelPattern.test(timeLabel)) {
-      const displayedDate =
-        timeText.match(
-          new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
-        )?.[1] ?? timeText;
-      return nullableText(time.getAttribute("datetime") ?? displayedDate);
-    }
-
-    const textBefore = textBeforeDescendant(element, time);
-    if (textBefore && labelPattern.test(textBefore)) {
+    const parent = (time.parentNode as HTMLElement | null) ?? cell;
+    const label =
+      deadlineLabelKind(time.getAttribute("aria-label") ?? "") ??
+      deadlineLabelKind(textContent(time)) ??
+      deadlineLabelKind(parent.getAttribute("aria-label") ?? "") ??
+      deadlineLabelKind(textBeforeDescendant(parent, time) ?? "");
+    if (label === kind || (label === null && allowUnlabeled)) {
       return nullableText(time.getAttribute("datetime") ?? textContent(time));
     }
   }
+  // An explicitly different timestamp (such as Released at) is never a fallback.
+  if (times.length > 0) return null;
 
-  const text = textContent(element);
-  const match = text.match(
-    new RegExp(`${labelPattern.source}\\s*:?\\s*(.+)$`, labelPattern.flags)
+  const text = textContent(cell);
+  const labels = [...text.matchAll(
+    /\b(?:released?(?:\s+date)?|late\s+(?:due(?:\s+date)?|deadline)|due(?:\s+date)?|deadline)\b/gi
+  )];
+  const matching = labels.find((label) => deadlineLabelKind(label[0]) === kind);
+  let value: string;
+  if (matching) {
+    const next = labels.find((label) => label.index! > matching.index!);
+    value = text.slice(matching.index! + matching[0].length, next?.index);
+  } else {
+    if (!allowUnlabeled || labels.length > 0) return null;
+    value = text;
+  }
+  return nullableText(
+    value.replace(/^\s*(?::|at\b)\s*/i, "")
+      .split(/;|\b(?:accepting\s+late\s+submissions|closed|closes\s+in)\b/i)[0]
   );
-  return nullableText(match?.[1] ?? null);
+}
+
+function completeDeadlineEpoch(value: string | null): number | null {
+  if (!value) return null;
+  let timestamp = value;
+  const gradescopeDate = timestamp.match(
+    /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-]\d{2})(\d{2})$/
+  );
+  if (gradescopeDate) {
+    timestamp = `${gradescopeDate[1]}T${gradescopeDate[2]}${gradescopeDate[3]}:${gradescopeDate[4]}`;
+  } else if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.test(
+      timestamp
+    )
+  ) {
+    return null;
+  }
+  const epoch = Date.parse(timestamp);
+  return Number.isNaN(epoch) ? null : epoch;
+}
+
+function deadlineStatusFrom(
+  dueDate: string | null,
+  lateDueDate: string | null,
+  deadlineText: string,
+  now: number
+): DeadlineStatus {
+  if (/accepting\s+late\s+submissions/i.test(deadlineText)) return "accepting_late";
+  if (/\bclosed\b/i.test(deadlineText)) return "closed";
+
+  const due = completeDeadlineEpoch(dueDate);
+  const lateDue = completeDeadlineEpoch(lateDueDate);
+  if (due !== null && lateDue !== null && lateDue < due) return "unknown";
+  if (due !== null && due > now) return "before_due";
+  if (due !== null && lateDue !== null && lateDue > due && lateDue > now) {
+    return "accepting_late";
+  }
+  if (lateDue !== null && lateDue <= now) return "closed";
+  return "unknown";
 }
 
 function statusFromRaw(raw: string | null): NormalizedSubmissionStatus {
@@ -338,7 +399,8 @@ function assignmentType(row: HTMLElement, href: string): string {
 
 function assignmentFromRow(
   row: HTMLElement,
-  courseId?: string
+  courseId: string | undefined,
+  now: number
 ): GradescopeAssignment | null {
   const link = row.querySelector('a[href*="/assignments/"]');
   const linkedHref = link?.getAttribute("href") ?? "";
@@ -362,7 +424,14 @@ function assignmentFromRow(
       /late.*due|late.*deadline|late.*date/
     ) ??
     cells.find((cell) =>
-      /\blate\s+(?:due\s+date|deadline)\b/i.test(textContent(cell))
+      /\blate\s+(?:due\s+date|deadline)\b/i.test(textContent(cell)) ||
+      cell
+        .querySelectorAll("[aria-label]")
+        .some((element) =>
+          /\blate\s+(?:due\s+date|deadline)\b/i.test(
+            element.getAttribute("aria-label") ?? ""
+          )
+        )
     ) ??
     null;
   const dueCell =
@@ -394,9 +463,21 @@ function assignmentFromRow(
   const status = statusWithScore(statusFromRaw(statusRaw), score);
   const lateText = valueContent(lateCell) ?? (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const late = lateFromText([lateText, statusRaw]);
-  const lateDueDate =
-    labeledDateContent(lateDueCell, /\blate\s+(?:due\s+date|deadline)\b/i) ??
-    valueContent(lateDueCell);
+  const lateDueDate = deadlineDateContent(
+    lateDueCell,
+    "late",
+    lateDueCell !== dueCell
+  );
+  const dueHeader = dueCell ? headers[cells.indexOf(dueCell)] ?? "" : "";
+  const dueDate = deadlineDateContent(
+    dueCell,
+    "regular",
+    dueCell !== lateDueCell && !/\breleased?\b/i.test(dueHeader)
+  );
+  const deadlineText = [dueCell, lateDueCell]
+    .filter((cell, index, cells): cell is HTMLElement => !!cell && cells.indexOf(cell) === index)
+    .map(textContent)
+    .join(" ");
   const nameCell =
     cellByHeader(cells, headers, /^(?:name|assignment)$/) ?? cells[0] ?? null;
 
@@ -404,8 +485,9 @@ function assignmentFromRow(
     id,
     name: nullableText(textContent(link)) ?? textContent(nameCell),
     type: assignmentType(row, href),
-    dueDate: valueContent(dueCell),
+    dueDate,
     lateDueDate,
+    deadlineStatus: deadlineStatusFrom(dueDate, lateDueDate, deadlineText, now),
     released: !row.querySelector(".unreleased, .draft") && !/\bunreleased\b/i.test(rowText),
     submissionStatus: status,
     statusRaw,
@@ -421,14 +503,15 @@ function assignmentFromRow(
 
 export function parseAssignmentList(
   html: string,
-  courseId?: string
+  courseId?: string,
+  now = Date.now()
 ): GradescopeAssignment[] {
   const root = parseHTML(html);
   const assignments: GradescopeAssignment[] = [];
   const seenIds = new Set<string>();
 
   for (const row of root.querySelectorAll("tr, .assignment-row")) {
-    const assignment = assignmentFromRow(row, courseId);
+    const assignment = assignmentFromRow(row, courseId, now);
     if (!assignment || seenIds.has(assignment.id)) continue;
     seenIds.add(assignment.id);
     assignments.push(assignment);

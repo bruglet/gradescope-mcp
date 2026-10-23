@@ -11,6 +11,12 @@ export type NormalizedRegradeStatus =
   | "resolved"
   | "unknown";
 
+export type DeadlineStatus =
+  | "before_due"
+  | "accepting_late"
+  | "closed"
+  | "unknown";
+
 export interface GradescopeCourse {
   id: string;
   name: string;
@@ -26,6 +32,7 @@ export interface GradescopeAssignment {
   type: string;
   dueDate: string | null;
   lateDueDate: string | null;
+  deadlineStatus: DeadlineStatus;
   released: boolean;
   submissionStatus: NormalizedSubmissionStatus;
   statusRaw: string | null;
@@ -96,5 +103,10 @@ export interface GradescopeClient {
   fetchAssignmentPdf(
     courseId: string,
     assignmentId: string
+  ): Promise<GradescopeProvidedPdf | null>;
+  fetchSubmissionPdf(
+    courseId: string,
+    assignmentId: string,
+    submissionId: string
   ): Promise<GradescopeProvidedPdf | null>;
 }

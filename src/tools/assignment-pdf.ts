@@ -45,7 +45,7 @@ export function registerAssignmentPdfTool(
     "download-assignment-pdf",
     {
       description:
-        "Retrieve the PDF supplied with an assignment, such as a worksheet or template, as an embedded resource with filename and size metadata. Use when the user asks to open, download, or check whether an assignment provides a PDF; this is the only Gradescope tool that determines file availability, and course_id and assignment_id normally come from list-courses and list-assignments. Do not use for submitted files or grading details; assignments without a provided PDF return available=false.",
+        "Retrieve the PDF supplied with an assignment, such as a worksheet or template, as an embedded resource with filename and size metadata. Use when the user asks to open, download, or check whether an assignment provides a PDF; course_id and assignment_id normally come from list-courses and list-assignments. Do not use for submitted files or grading details; assignments without a provided PDF return available=false.",
       inputSchema,
       outputSchema: downloadAssignmentPdfOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,

@@ -3,6 +3,7 @@ import { registerAssignmentPdfTool } from "./tools/assignment-pdf.js";
 import { registerAssignmentTools } from "./tools/assignments.js";
 import { registerCourseTools } from "./tools/courses.js";
 import { registerRegradeTools } from "./tools/regrade-requests.js";
+import { registerSubmissionPdfTool } from "./tools/submission-pdf.js";
 import { registerSubmissionTools } from "./tools/submissions.js";
 import type { GradescopeClient } from "./types.js";
 
@@ -31,6 +32,7 @@ export function createServer(api: GradescopeClient): McpServer {
   registerAssignmentTools(server, api);
   registerAssignmentPdfTool(server, api);
   registerSubmissionTools(server, api);
+  registerSubmissionPdfTool(server, api);
   registerRegradeTools(server, api);
 
   return server;

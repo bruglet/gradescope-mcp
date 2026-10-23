@@ -23,7 +23,7 @@ export function registerAssignmentTools(
     "list-assignments",
     {
       description:
-        "List assignments for a course, including IDs, due and late-due dates, submission status and time, lateness, scores, release state, and URLs. Use for questions about deadlines, missing or submitted work, or course grades, and to obtain an assignment_id for assignment-specific tools; use list-courses first if course_id is unknown. Use list-submissions for attempt history and get-submission for question or rubric details; null or unknown fields mean Gradescope did not expose the value reliably.",
+        "List assignments for a course, including regular and late deadlines, current deadline phase, submission status and time, lateness, scores, release state, and URLs. The deadline phase is before_due, accepting_late, closed, or unknown. Use for questions about deadlines, missing or submitted work, or course grades, and to obtain an assignment_id for assignment-specific tools; use list-courses first if course_id is unknown. Use list-submissions for attempt history and get-submission for question or rubric details; null or unknown fields mean Gradescope did not expose the value reliably.",
       inputSchema: courseInput,
       outputSchema: listAssignmentsOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -44,6 +44,7 @@ export function registerAssignmentTools(
             assignment_type: assignment.type,
             due_date: assignment.dueDate,
             late_due_date: assignment.lateDueDate,
+            deadline_status: assignment.deadlineStatus,
             submission_status: assignment.submissionStatus,
             status_raw: assignment.statusRaw,
             submitted: assignment.submitted,

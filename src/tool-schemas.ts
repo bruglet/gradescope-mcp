@@ -15,6 +15,13 @@ export const normalizedRegradeStatusSchema = z.enum([
   "unknown",
 ]);
 
+export const deadlineStatusSchema = z.enum([
+  "before_due",
+  "accepting_late",
+  "closed",
+  "unknown",
+]);
+
 const courseSchema = z.object({
   course_id: z.string(),
   course_name: z.string(),
@@ -29,6 +36,9 @@ const assignmentSchema = z.object({
   assignment_type: z.string(),
   due_date: z.string().nullable(),
   late_due_date: z.string().nullable(),
+  deadline_status: deadlineStatusSchema.describe(
+    "Current deadline phase from Gradescope labels and complete due timestamps; unknown when it cannot be determined."
+  ),
   submission_status: normalizedSubmissionStatusSchema,
   status_raw: z.string().nullable(),
   submitted: z.boolean().nullable(),
@@ -115,4 +125,8 @@ export const downloadAssignmentPdfOutputSchema = z.object({
   filename: z.string().nullable(),
   mime_type: z.literal("application/pdf").nullable(),
   byte_length: z.number().int().nonnegative().nullable(),
+});
+
+export const downloadSubmissionPdfOutputSchema = downloadAssignmentPdfOutputSchema.extend({
+  submission_id: z.string(),
 });

@@ -13,7 +13,7 @@ const signedUrlParameters = [
   "X-Amz-SignedHeaders",
 ];
 
-export interface AssignmentPdfLink {
+export interface PdfLink {
   url: string;
   filename: string;
 }
@@ -42,7 +42,7 @@ function submissionFormPath(
   }
 }
 
-function filenameFromPath(pathname: string, assignmentId: string): string {
+function filenameFromPath(pathname: string, fallbackFilename: string): string {
   const rawName = pathname.split("/").pop() ?? "";
   try {
     const decoded = decodeURIComponent(rawName);
@@ -50,19 +50,20 @@ function filenameFromPath(pathname: string, assignmentId: string): string {
   } catch {
     // Fall through to a safe deterministic name for malformed paths.
   }
-  return `assignment-${assignmentId}.pdf`;
+  return fallbackFilename;
 }
 
 function parseAllowedPdfUrl(
   href: string | null | undefined,
-  assignmentId: string
-): AssignmentPdfLink | null {
+  fallbackFilename: string
+): PdfLink | null {
   if (!href) return null;
 
   try {
     const url = new URL(href, gradescopeOrigin);
     if (
       url.protocol !== "https:" ||
+      Boolean(url.username || url.password || url.port || url.hash) ||
       !uploadHostPattern.test(url.hostname) ||
       !pdfPathPattern.test(url.pathname)
     ) {
@@ -75,7 +76,7 @@ function parseAllowedPdfUrl(
 
     return {
       url: url.toString(),
-      filename: filenameFromPath(url.pathname, assignmentId),
+      filename: filenameFromPath(url.pathname, fallbackFilename),
     };
   } catch {
     return null;
@@ -85,9 +86,9 @@ function parseAllowedPdfUrl(
 function parseAllowedPdfLink(
   anchor: HTMLElement,
   assignmentId: string
-): AssignmentPdfLink | null {
+): PdfLink | null {
   if (!/download.*pdf/i.test(normalizedText(anchor))) return null;
-  return parseAllowedPdfUrl(anchor.getAttribute("href"), assignmentId);
+  return parseAllowedPdfUrl(anchor.getAttribute("href"), `assignment-${assignmentId}.pdf`);
 }
 
 function assignmentButtonId(element: HTMLElement): string | null {
@@ -113,7 +114,7 @@ export function parseAssignmentPdfLink(
   html: string,
   courseId: string,
   assignmentId: string
-): AssignmentPdfLink | null {
+): PdfLink | null {
   const root = parseHTML(html);
 
   const assignmentButton = root
@@ -123,7 +124,7 @@ export function parseAssignmentPdfLink(
     .find((candidate) => assignmentButtonId(candidate) === assignmentId);
   const templateLink = parseAllowedPdfUrl(
     assignmentButton?.getAttribute("data-template-url"),
-    assignmentId
+    `assignment-${assignmentId}.pdf`
   );
   if (templateLink) return templateLink;
 
@@ -144,5 +145,28 @@ export function parseAssignmentPdfLink(
     if (link) return link;
   }
 
+  return null;
+}
+
+/** Read only the original upload path, never the graded PDF export path. */
+export function parseSubmissionPdfLink(
+  html: string,
+  submissionId: string
+): PdfLink | null {
+  const root = parseHTML(html);
+  for (const viewer of root.querySelectorAll(
+    '[data-react-class="AssignmentSubmissionViewer"][data-react-props]'
+  )) {
+    try {
+      const props = JSON.parse(viewer.getAttribute("data-react-props") ?? "");
+      if (String(props?.assignment_submission?.id) !== submissionId) continue;
+      const originalPath = props?.paths?.original_file_path;
+      if (typeof originalPath !== "string") continue;
+      const link = parseAllowedPdfUrl(originalPath, `submission-${submissionId}.pdf`);
+      if (link) return link;
+    } catch {
+      // Malformed or unsupported viewer data does not establish a PDF source.
+    }
+  }
   return null;
 }

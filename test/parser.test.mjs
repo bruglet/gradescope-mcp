@@ -38,7 +38,11 @@ test("recognizes the live Your Courses student dashboard without a role heading"
 });
 
 test("normalizes assignment dates, states, timestamps, lateness, and scores", () => {
-  const assignments = parseAssignmentList(fixture("assignments.html"));
+  const assignments = parseAssignmentList(
+    fixture("assignments.html"),
+    undefined,
+    Date.parse("2026-08-19T00:00:00Z")
+  );
   assert.equal(assignments.length, 4);
   assert.equal(assignments[0].type, "unknown");
 
@@ -48,6 +52,7 @@ test("normalizes assignment dates, states, timestamps, lateness, and scores", ()
     type: "unknown",
     dueDate: "2026-08-20T23:59:00-07:00",
     lateDueDate: "2026-08-22T23:59:00-07:00",
+    deadlineStatus: "before_due",
     released: true,
     submissionStatus: "submitted",
     statusRaw: "Submitted",
@@ -123,6 +128,46 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
       },
     ]
   );
+});
+
+test("determines deadline status from labeled dates and explicit UI status", () => {
+  const now = Date.parse("2026-09-03T12:00:00-07:00");
+  const assignments = parseAssignmentList(
+    fixture("assignment-deadlines.html"),
+    "101",
+    now
+  );
+
+  assert.deepEqual(
+    assignments.map(({ id, dueDate, lateDueDate, deadlineStatus }) => ({
+      id,
+      dueDate,
+      lateDueDate,
+      deadlineStatus,
+    })),
+    [
+      { id: "801", dueDate: "2026-09-02T10:00:00-07:00", lateDueDate: "2026-09-04T10:00:00-07:00", deadlineStatus: "accepting_late" },
+      { id: "802", dueDate: "2026-09-05T10:00:00-07:00", lateDueDate: null, deadlineStatus: "before_due" },
+      { id: "803", dueDate: "2026-09-02 10:00:00 -0700", lateDueDate: "2026-09-03 11:00:00 -0700", deadlineStatus: "closed" },
+      { id: "804", dueDate: null, lateDueDate: "2026-09-04T10:00:00-07:00", deadlineStatus: "unknown" },
+      { id: "805", dueDate: "2026-09-02T10:00:00-07:00", lateDueDate: "2026-09-02T10:00:00-07:00", deadlineStatus: "closed" },
+      { id: "806", dueDate: "TBD", lateDueDate: null, deadlineStatus: "accepting_late" },
+      { id: "807", dueDate: "2026-09-05T10:00:00-07:00", lateDueDate: null, deadlineStatus: "closed" },
+      { id: "808", dueDate: "Sep 5", lateDueDate: null, deadlineStatus: "unknown" },
+      { id: "809", dueDate: "09/05/2026", lateDueDate: null, deadlineStatus: "unknown" },
+      { id: "810", dueDate: null, lateDueDate: "2026-09-06T10:00:00-07:00", deadlineStatus: "unknown" },
+      { id: "813", dueDate: null, lateDueDate: null, deadlineStatus: "unknown" },
+    ]
+  );
+  assert.equal(assignments[0].submissionStatus, "submitted");
+  assert.equal(assignments[0].late, true);
+
+  const laterPage = parseAssignmentList(
+    fixture("assignment-deadlines-no-status.html"),
+    "101",
+    now
+  );
+  assert.equal(laterPage[0].deadlineStatus, "unknown");
 });
 
 test("finds only the current assignment's fresh signed PDF link", () => {
