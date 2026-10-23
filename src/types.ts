@@ -71,13 +71,15 @@ export interface GradescopeQuestionResult {
   name: string;
   score: number | null;
   maxScore: number | null;
+  scoringType: "positive" | "negative" | null;
   rubricItems: GradescopeRubricItem[];
+  scoreAdjustments: Array<{ points: number; comment: string | null }>;
   comments: string[];
 }
 
 export interface GradescopeRubricItem {
   description: string;
-  points: number;
+  points: number | null;
   applied: boolean;
 }
 

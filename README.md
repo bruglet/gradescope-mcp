@@ -25,6 +25,8 @@ The data tools publish structured output and also include the same JSON as text 
 
 `list-assignments` reports `deadline_status` as `before_due`, `accepting_late`, `closed`, or `unknown`. It uses explicit Gradescope deadline labels when present, then complete due timestamps. It returns `unknown` when the page does not provide enough information.
 
+`get-submission` includes rubric categories with signed point values and an `applied` flag for each question. `scoring_type` identifies whether the rubric awards points from zero (`positive`) or deducts from full credit (`negative`); `score_adjustments` reports separate adjustments that can also affect the final score. This data comes from the submission page without generating or downloading a graded PDF; unavailable rubric data stays empty, and unknown scoring direction returns `points=null`.
+
 ## Read-only guarantee
 
 The MCP surface contains no submission, regrade-creation, extension, grading, roster, grade-export, debug-page, or other mutation tool. The Gradescope client exposes authenticated page GETs plus narrowly restricted GETs for provided and original submitted PDFs. Its only outbound non-GET request is the required form POST to `/login`; same-origin URLs and redirects are enforced before Gradescope cookies are attached, and redirects are bounded. PDF downloads use fresh signed upload URLs from the student course page or an owned submission viewer without sending Gradescope cookies, accept only the known Gradescope PDF-upload path, and are capped at 25 MiB. Submission downloads use only the viewer’s original-file path and never the graded PDF export. They require a submission ID returned by the student dashboard; submissions without an original PDF return `available=false`.

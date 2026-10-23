@@ -259,6 +259,29 @@ test("list-assignments parses unlinked student dashboard rows", async () => {
   }
 });
 
+test("keeps the labeled regular deadline separate from the active late cutoff", async () => {
+  const connection = await connected({
+    fetchPage: async (path) => {
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("assignments-active-late-deadline.html");
+      throw new Error(`unexpected path ${path}`);
+    },
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: "list-assignments", arguments: { course_id: "101" },
+    });
+    assert.equal(result.isError, undefined);
+    const [lab, , lateOnly] = result.structuredContent.assignments;
+    assert.equal(lab.due_date, "2026-10-22 21:00:00 -0700");
+    assert.equal(lab.late_due_date, "2026-12-07 21:00:00 -0800");
+    assert.equal(lab.deadline_status, "accepting_late");
+    assert.equal(lateOnly.due_date, null);
+  } finally {
+    await closeConnection(connection);
+  }
+});
+
 test("publishes schema-validated deadline status values", async () => {
   const api = {
     fetchPage: async (path) => {
@@ -464,5 +487,36 @@ test("rejects non-student courses, unowned submissions, and invalid IDs before d
     } finally {
       await closeConnection(connection);
     }
+  }
+});
+
+test("get-submission returns rubric selections and separate score adjustments without a PDF request", async () => {
+  const calls = [];
+  const connection = await connected({
+    fetchPage: async (path) => {
+      calls.push(path);
+      if (path === "/account") return fixture("account.html");
+      if (path === "/courses/101") return fixture("course-submission-links.html");
+      if (path === "/courses/101/assignments/201/submissions/301") return fixture("submission-rubrics.html");
+      throw new Error(`Unexpected page or PDF request ${path}`);
+    },
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: "get-submission",
+      arguments: { course_id: "101", assignment_id: "201", submission_id: "301" },
+    });
+    assert.equal(result.isError, undefined);
+    const [positive, negative, adjusted, multiple, unknown] = result.structuredContent.submission.questions;
+    assert.equal(positive.scoring_type, "positive");
+    assert.deepEqual(positive.rubric_items.filter(r => r.applied), [{ description: "Partial credit", points: 2, applied: true }]);
+    assert.equal(negative.scoring_type, "negative");
+    assert.deepEqual(negative.rubric_items.filter(r => r.applied), [{ description: "Missing justification", points: -1, applied: true }]);
+    assert.deepEqual(adjusted.score_adjustments, [{ points: 1, comment: "Adjustment after review" }]);
+    assert.equal(multiple.rubric_items.filter(r => r.applied).length, 2);
+    assert.equal(unknown.rubric_items[0].points, null);
+    assert.deepEqual(calls, ["/account", "/courses/101", "/courses/101/assignments/201/submissions/301"]);
+  } finally {
+    await closeConnection(connection);
   }
 });

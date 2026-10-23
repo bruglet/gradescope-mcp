@@ -66,15 +66,24 @@ const submissionSummarySchema = z.object({
 
 const rubricItemSchema = z.object({
   description: z.string(),
-  points: z.number(),
-  applied: z.boolean(),
+  points: z.number().nullable().describe(
+    "Signed category points: positive awards credit, negative deducts credit; null when the scoring direction is unavailable."
+  ),
+  applied: z.boolean().describe("Whether Gradescope explicitly marks this category as applied to this question."),
 });
 
 const questionResultSchema = z.object({
   name: z.string(),
   score: z.number().nullable(),
   max_score: z.number().nullable(),
+  scoring_type: z.enum(["positive", "negative"]).nullable().describe(
+    "Positive rubrics start at zero; negative rubrics start at full credit. Null means Gradescope did not expose the mode."
+  ),
   rubric_items: z.array(rubricItemSchema),
+  score_adjustments: z.array(z.object({
+    points: z.number().describe("Additional signed score adjustment, independent of the rubric scoring mode."),
+    comment: z.string().nullable(),
+  })),
   comments: z.array(z.string()),
 });
 

@@ -54,7 +54,7 @@ export function registerSubmissionPdfTool(
     "download-submission-pdf",
     {
       description:
-        "Retrieve the original PDF uploaded for one owned submission as an embedded resource with filename and size metadata. Use when the user asks to open or download their submitted work; obtain course_id and assignment_id from list-courses and list-assignments, and submission_id from list-submissions. This returns the file as submitted, without grading annotations, and never downloads the graded PDF export. Returns available=false when the submission does not expose an original PDF; use download-assignment-pdf for a provided worksheet or template.",
+        "Retrieve a submission's original PDF as an embedded resource with filename and size metadata; use when the user asks to open or download their submitted work. Obtain course_id from list-courses, assignment_id from list-assignments, and submission_id from list-submissions; only owned submissions are supported. Use download-assignment-pdf for provided worksheets or templates and get-submission for grading details; this tool excludes grading annotations, returns available=false when no original PDF is exposed, and rejects PDFs over 25 MiB.",
       inputSchema,
       outputSchema: downloadSubmissionPdfOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,

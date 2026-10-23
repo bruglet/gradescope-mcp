@@ -130,6 +130,24 @@ test("parses student dashboard rows with assignment IDs but no links", () => {
   );
 });
 
+test("uses labeled regular deadlines instead of Gradescope's hidden active cutoff", () => {
+  const page = fixture("assignments-active-late-deadline.html");
+  const now = Date.parse("2026-10-23T12:00:00-07:00");
+  const result = parseAssignmentList(page, "101", now);
+  assert.deepEqual(result.map(({ id, dueDate, lateDueDate, deadlineStatus }) => ({
+    id, dueDate, lateDueDate, deadlineStatus,
+  })), [
+    { id: "901", dueDate: "2026-10-22 21:00:00 -0700", lateDueDate: "2026-12-07 21:00:00 -0800", deadlineStatus: "accepting_late" },
+    { id: "902", dueDate: "2026-10-26 09:00:00 -0700", lateDueDate: "2026-12-07 21:00:00 -0800", deadlineStatus: "before_due" },
+    { id: "903", dueDate: null, lateDueDate: "2026-12-07 21:00:00 -0800", deadlineStatus: "unknown" },
+  ]);
+  // A sorting-only value must not become a regular deadline when its label is absent.
+  for (const marker of ['hidden', 'aria-hidden="true"']) {
+    const hiddenPage = page.replaceAll('class="hidden-column"', marker);
+    assert.deepEqual(parseAssignmentList(hiddenPage, "101", now), result);
+  }
+});
+
 test("determines deadline status from labeled dates and explicit UI status", () => {
   const now = Date.parse("2026-09-03T12:00:00-07:00");
   const assignments = parseAssignmentList(

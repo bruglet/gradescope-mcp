@@ -221,6 +221,14 @@ function deadlineDateContent(
   );
 }
 
+function isHiddenColumn(cell: HTMLElement): boolean {
+  return (
+    /\bhidden-column\b/.test(cell.getAttribute("class") ?? "") ||
+    cell.hasAttribute("hidden") ||
+    cell.getAttribute("aria-hidden") === "true"
+  );
+}
+
 function completeDeadlineEpoch(value: string | null): number | null {
   if (!value) return null;
   let timestamp = value;
@@ -468,9 +476,18 @@ function assignmentFromRow(
     "late",
     lateDueCell !== dueCell
   );
+  // Gradescope's hidden Due Date column sorts by the active cutoff, which
+  // switches to the late deadline. Prefer the visible regular-deadline label.
+  const labeledDueDate = cells
+    .filter((cell, index) =>
+      !isHiddenColumn(cell) &&
+      (cell === dueCell || cell === lateDueCell || /due|deadline/.test(headers[index] ?? ""))
+    )
+    .map((cell) => deadlineDateContent(cell, "regular", false))
+    .find((date) => date !== null);
   const dueHeader = dueCell ? headers[cells.indexOf(dueCell)] ?? "" : "";
-  const dueDate = deadlineDateContent(
-    dueCell,
+  const dueDate = labeledDueDate ?? deadlineDateContent(
+    dueCell && !isHiddenColumn(dueCell) ? dueCell : null,
     "regular",
     dueCell !== lateDueCell && !/\breleased?\b/i.test(dueHeader)
   );
@@ -664,11 +681,11 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
       if (!description) continue;
       const points = parseNumber(
         textContent(rubric.querySelector(".rubricItem--points, .points, td:last-child"))
-      ) ?? 0;
+      );
       const className = rubric.getAttribute("class") ?? "";
       const applied =
         !!rubric.querySelector(".rubricItem--selected, .selected, .applied, .checked") ||
-        /selected|applied|checked/.test(className);
+        /(?:^|\s)(?:rubricItem--)?(?:selected|applied|checked)(?:\s|$)/.test(className);
       rubricItems.push({ description, points, applied });
     }
 
@@ -682,7 +699,9 @@ function parseQuestionResults(root: HTMLElement): GradescopeQuestionResult[] {
       name,
       score: score?.score ?? null,
       maxScore: score?.maxScore ?? null,
+      scoringType: null,
       rubricItems,
+      scoreAdjustments: [],
       comments,
     });
   }
@@ -826,6 +845,7 @@ function questionScore(record: JsonRecord): {
 interface QuestionMetadata {
   name: string | null;
   maxScore: number | null;
+  scoringType: GradescopeQuestionResult["scoringType"];
 }
 
 function mergeQuestionMetadata(
@@ -837,6 +857,7 @@ function mergeQuestionMetadata(
   metadata.set(id, {
     name: previous?.name ?? next.name,
     maxScore: previous?.maxScore ?? next.maxScore,
+    scoringType: previous?.scoringType ?? next.scoringType,
   });
 }
 
@@ -859,8 +880,11 @@ function collectQuestionMetadata(
   const id = questionIdFromRecord(value, true) ?? inheritedId;
   const name = questionNameFromRecord(value);
   const maxScore = questionMaxScore(value);
-  if (id && (name !== null || maxScore !== null)) {
-    mergeQuestionMetadata(metadata, id, { name, maxScore });
+  const scoringType = value.scoring_type === "positive" || value.scoring_type === "negative"
+    ? value.scoring_type
+    : null;
+  if (id && (name !== null || maxScore !== null || scoringType !== null)) {
+    mergeQuestionMetadata(metadata, id, { name, maxScore, scoringType });
   }
 
   for (const [key, child] of Object.entries(value)) {
@@ -901,12 +925,49 @@ function parseViewerProps(root: HTMLElement): JsonRecord | null {
   }
 }
 
+function parseViewerRubrics(
+  props: JsonRecord,
+  metadata: Map<string, QuestionMetadata>
+): Map<string, GradescopeRubricItem[]> {
+  const rubrics = new Map<string, GradescopeRubricItem[]>();
+  if (props.grades_visible === false) return rubrics;
+
+  const seen = new Set<string>();
+  const entries = objectEntries(props.rubric_items).sort((left, right) =>
+    (scalarNumber(left.value.position) ?? Number.MAX_SAFE_INTEGER) -
+    (scalarNumber(right.value.position) ?? Number.MAX_SAFE_INTEGER)
+  );
+  for (const { value, key } of entries) {
+    const questionId = questionIdFromRecord(value, false);
+    const weight = scalarNumber(value.weight);
+    if (!questionId || weight === null || typeof value.present !== "boolean") continue;
+    const id = numericIdentifier(value.id) ?? key;
+    const identity = id ? `${questionId}:${id}` : null;
+    if (identity && seen.has(identity)) continue;
+    if (identity) seen.add(identity);
+
+    const scoringType = metadata.get(questionId)?.scoringType;
+    const points = scoringType === "negative"
+      ? (weight === 0 ? 0 : -weight)
+      : scoringType === "positive" ? weight : null;
+    const items = rubrics.get(questionId) ?? [];
+    items.push({
+      description: scalarText(value.description) ?? "",
+      points,
+      applied: value.present,
+    });
+    rubrics.set(questionId, items);
+  }
+  return rubrics;
+}
+
 function parseViewerQuestions(
   props: JsonRecord
 ): GradescopeQuestionResult[] {
   const metadata = new Map<string, QuestionMetadata>();
   collectQuestionMetadata(props.questions, metadata);
   collectQuestionMetadata(props.outline, metadata);
+  const rubrics = parseViewerRubrics(props, metadata);
 
   const inorderIds = Array.isArray(props.inorder_leaf_question_ids)
     ? props.inorder_leaf_question_ids
@@ -944,18 +1005,28 @@ function parseViewerQuestions(
     const key = entry.id ?? `${name}|${score.score ?? ""}|${maxScore ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const evaluations = props.grades_visible === false
+      ? []
+      : objectEntries(entry.value.evaluations).map(({ value }) => value);
+    const scoreAdjustments = evaluations.flatMap((evaluation) => {
+      const points = scalarNumber(evaluation.points);
+      return points === null ? [] : [{ points, comment: scalarText(evaluation.comments) }];
+    });
     questions.push({
       name,
       score: score.score,
       maxScore,
-      rubricItems: [],
-      comments: [],
+      scoringType: meta?.scoringType ?? null,
+      rubricItems: entry.id ? rubrics.get(entry.id) ?? [] : [],
+      scoreAdjustments,
+      comments: uniqueStrings(evaluations.map((evaluation) => scalarText(evaluation.comments) ?? "")),
     });
   }
   return questions;
 }
 
 function parseViewerSubmission(root: HTMLElement): {
+  gradesVisible: boolean;
   score: number | null;
   maxScore: number | null;
   submissionStatus: NormalizedSubmissionStatus;
@@ -1027,6 +1098,7 @@ function parseViewerSubmission(root: HTMLElement): {
       : lateFromText([lateness, statusRawCandidate]);
 
   return {
+    gradesVisible: props.grades_visible !== false,
     score,
     maxScore: resolvedMaxScore,
     submissionStatus: status,
@@ -1074,6 +1146,26 @@ export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail 
     (statusRaw && /\blate\b/i.test(statusRaw) ? statusRaw : null);
   const htmlSubmittedAt = valueContent(summary.querySelector("time[datetime], [class*='submitted']"));
   const htmlQuestions = parseQuestionResults(root);
+  const viewerQuestions = viewerSubmission?.questions ?? [];
+  // The viewer identifies individual leaf questions; HTML may contain only
+  // parent headings or collapsed rubrics. Enrich exact matches without losing leaves.
+  let questions = viewerQuestions.length > 0
+    ? viewerQuestions.map((viewer) => {
+        const html = htmlQuestions.find((question) => question.name === viewer.name);
+        return {
+          ...viewer,
+          score: html?.score ?? viewer.score,
+          maxScore: html?.maxScore ?? viewer.maxScore,
+          rubricItems: viewer.rubricItems.length > 0 ? viewer.rubricItems : html?.rubricItems ?? [],
+          comments: uniqueStrings([...viewer.comments, ...(html?.comments ?? [])]),
+        };
+      })
+    : htmlQuestions;
+  if (viewerSubmission?.gradesVisible === false) {
+    questions = questions.map((question) => ({
+      ...question, rubricItems: [], scoreAdjustments: [], comments: [],
+    }));
+  }
 
   return {
     id: "",
@@ -1086,7 +1178,7 @@ export function parseSubmissionDetail(html: string): GradescopeSubmissionDetail 
     late: viewerSubmission?.late ?? lateFromText([lateText, statusRaw]),
     lateness: lateText,
     url: "",
-    questions: htmlQuestions.length > 0 ? htmlQuestions : viewerSubmission?.questions ?? [],
+    questions,
   };
 }
 

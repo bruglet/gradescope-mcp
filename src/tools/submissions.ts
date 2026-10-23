@@ -80,7 +80,7 @@ export function registerSubmissionTools(
     "get-submission",
     {
       description:
-        "Get one specific submission with its summary, per-question scores, rubric items, and grader comments. Use for detailed grading questions after list-submissions provides submission_id; do not use for assignment overviews or attempt history. Question, rubric, or comment arrays may be empty when Gradescope has not released or does not expose those details.",
+        "Get one submission with its summary, per-question scores, rubric categories and applied selections, scoring mode, separate score adjustments, and grader comments. Use when the user asks where points were lost or which category they received, after list-submissions provides submission_id; use list-assignments for overviews and list-submissions for attempt history. Rubric points are signed awards or deductions and separate adjustments can affect the final score; unavailable details may be empty or null, and no graded PDF is needed.",
       inputSchema: detailInput,
       outputSchema: getSubmissionOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
@@ -128,11 +128,13 @@ export function registerSubmissionTools(
               name: question.name,
               score: question.score,
               max_score: question.maxScore,
+              scoring_type: question.scoringType,
               rubric_items: question.rubricItems.map((item) => ({
                 description: item.description,
                 points: item.points,
                 applied: item.applied,
               })),
+              score_adjustments: question.scoreAdjustments,
               comments: question.comments,
             })),
           },
